@@ -1,13 +1,8 @@
-const express = require("express");
+require("dotenv").config();
 
-const app = express();
+const app = require("./app");
+
 const PORT = process.env.PORT || 3006;
-
-app.use(express.json());
-
-app.get("/", (_req, res) => {
-  res.json({ status: "ok", message: "bjapi rodando" });
-});
 
 app.listen(PORT, () => {
   console.log(`Servidor rodando em http://localhost:${PORT}`);

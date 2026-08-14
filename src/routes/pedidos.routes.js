@@ -1,0 +1,539 @@
+const { Router } = require("express");
+const { z } = require("zod");
+const prisma = require("../lib/prisma");
+const { HttpError } = require("../lib/httpError");
+const { asyncHandler } = require("../lib/asyncHandler");
+const { carregarTabelaAtivaDaEmpresa, resolverPrecoProduto } = require("../lib/precoResolver");
+const { authenticate, requireRole } = require("../middleware/auth");
+
+const router = Router();
+
+function apenasDigitos(valor) {
+  return String(valor ?? "").replace(/\D/g, "");
+}
+
+function formatarMoeda(valor) {
+  return new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(valor);
+}
+
+const pedidoSchema = z.object({
+  tipoOperacao: z.enum(["entrega", "retirada"]),
+  cliente: z.object({
+    cpfCnpj: z.string().trim().min(11, "Informe um CPF ou CNPJ válido."),
+    nome: z.string().trim().min(1, "Informe o nome."),
+    razaoSocial: z.string().trim().nullable().optional(),
+    inscricaoEstadual: z.string().trim().nullable().optional(),
+  }),
+  endereco: z
+    .object({
+      cep: z.string().trim().min(1),
+      rua: z.string().trim().min(1),
+      numero: z.string().trim().min(1),
+      referencia: z.string().trim().nullable().optional(),
+      bairroId: z.string().trim().nullable().optional(),
+      bairroNome: z.string().trim().nullable().optional(),
+      cidade: z.string().trim().min(1),
+      estado: z.string().trim().length(2),
+    })
+    .nullable(),
+  formaPagamento: z.object({
+    codigo: z.string().trim().min(1),
+    parcelas: z.number().int().positive(),
+  }),
+  cupomCodigo: z.string().trim().nullable().optional(),
+  itens: z
+    .array(
+      z.object({
+        codigo: z.number().int(),
+        quantidade: z.number().positive(),
+      }),
+    )
+    .min(1, "O carrinho está vazio."),
+});
+
+function toPublicPedido(pedido) {
+  return {
+    id: pedido.id,
+    numero: pedido.numero,
+    status: pedido.status,
+    subtotal: pedido.subtotal.toString(),
+    descontoCupomValor: pedido.descontoCupomValor.toString(),
+    descontoPagamentoValor: pedido.descontoPagamentoValor.toString(),
+    freteValor: pedido.freteValor.toString(),
+    total: pedido.total.toString(),
+    tipoOperacao: pedido.tipoOperacao,
+    pagamentos: (pedido.pagamentos ?? []).map((p) => ({
+      formaPagamentoCodigo: p.formaPagamentoCodigo,
+      formaPagamentoNome: p.formaPagamentoNome,
+      parcelas: p.parcelas,
+      valor: p.valor.toString(),
+    })),
+    createdAt: pedido.createdAt.toISOString(),
+  };
+}
+
+// Pública — cria o pedido no nosso banco (fonte da verdade pro dashboard e
+// pro histórico do cliente). Nunca confia em preço/subtotal/total mandados
+// pelo client — tudo é recalculado aqui em cima dos dados reais da loja,
+// igual à lógica já usada no checkout e no admin (resolverPrecoProduto,
+// validação de cupom, frete por bairro).
+router.post(
+  "/publico/:slug",
+  asyncHandler(async (req, res) => {
+    const empresa = await prisma.empresa.findUnique({ where: { slug: req.params.slug } });
+    if (!empresa || !empresa.ativo) throw new HttpError(404, "Loja não encontrada.");
+
+    const data = pedidoSchema.parse(req.body);
+
+    if (data.tipoOperacao === "entrega" && !empresa.permiteEntrega) {
+      throw new HttpError(400, "Esta loja não realiza entregas no momento.");
+    }
+    if (data.tipoOperacao === "retirada" && !empresa.permiteRetirada) {
+      throw new HttpError(400, "Esta loja não permite retirada no momento.");
+    }
+    if (data.tipoOperacao === "entrega" && !data.endereco) {
+      throw new HttpError(400, "Informe o endereço de entrega.");
+    }
+
+    // Produtos — só os que ainda existem, estão ativos e visíveis no site.
+    const codigos = data.itens.map((i) => i.codigo);
+    const tabelaAtiva = await carregarTabelaAtivaDaEmpresa(prisma, empresa);
+    const produtos = await prisma.produto.findMany({
+      where: { empresaId: empresa.id, codigo: { in: codigos }, ativo: true, usaNoSite: true },
+    });
+    const produtosPorCodigo = new Map(produtos.map((p) => [p.codigo, p]));
+
+    const itensResolvidos = data.itens.map((item) => {
+      const produto = produtosPorCodigo.get(item.codigo);
+      if (!produto) {
+        throw new HttpError(400, `Um dos produtos do carrinho não está mais disponível (código ${item.codigo}).`);
+      }
+      const { precoFinal } = resolverPrecoProduto(produto, tabelaAtiva);
+      const precoTotal = Number(precoFinal) * item.quantidade;
+      return {
+        produtoCodigo: produto.codigo,
+        descricao: produto.descricao,
+        grupoNome: produto.grupoNome,
+        precoUnitario: precoFinal,
+        quantidade: item.quantidade,
+        precoTotal,
+      };
+    });
+
+    const subtotal = itensResolvidos.reduce((soma, i) => soma + i.precoTotal, 0);
+
+    if (empresa.pedidoMinimo != null && subtotal < Number(empresa.pedidoMinimo)) {
+      throw new HttpError(
+        400,
+        `Pedido mínimo de ${formatarMoeda(Number(empresa.pedidoMinimo))} não atingido.`,
+      );
+    }
+
+    // Frete — só em entrega; bairro cadastrado prevalece, senão cai no valor
+    // padrão da loja (mesma regra do checkout).
+    let bairro = null;
+    let freteValor = 0;
+    if (data.tipoOperacao === "entrega") {
+      if (data.endereco.bairroId) {
+        bairro = await prisma.bairro.findFirst({
+          where: { id: data.endereco.bairroId, empresaId: empresa.id },
+        });
+        if (!bairro) throw new HttpError(400, "Bairro inválido.");
+        freteValor = Number(bairro.valor);
+      } else if (empresa.valorPadraoFrete != null) {
+        freteValor = Number(empresa.valorPadraoFrete);
+      }
+    }
+
+    // Cupom
+    let cupom = null;
+    let descontoCupomValor = 0;
+    let cupomFreteGratis = false;
+    if (data.cupomCodigo) {
+      const codigoCupom = data.cupomCodigo.trim().toUpperCase();
+      cupom = await prisma.cupom.findFirst({ where: { empresaId: empresa.id, codigo: codigoCupom } });
+      if (!cupom || !cupom.ativo) throw new HttpError(400, "Cupom inválido ou inativo.");
+      if (cupom.dataVencimento && cupom.dataVencimento < new Date()) {
+        throw new HttpError(400, "Esse cupom expirou.");
+      }
+      if (cupom.limiteUsos != null && cupom.usosRealizados >= cupom.limiteUsos) {
+        throw new HttpError(400, "Esse cupom já atingiu o limite de usos.");
+      }
+      if (cupom.valorCompraMinima != null && subtotal < Number(cupom.valorCompraMinima)) {
+        throw new HttpError(
+          400,
+          `Esse cupom exige compra mínima de ${formatarMoeda(Number(cupom.valorCompraMinima))}.`,
+        );
+      }
+      if (cupom.tipo === "VALOR") descontoCupomValor = Math.min(Number(cupom.valor), subtotal);
+      else if (cupom.tipo === "PERCENTUAL") descontoCupomValor = (subtotal * Number(cupom.valor)) / 100;
+      else if (cupom.tipo === "FRETE_GRATIS") {
+        if (data.tipoOperacao === "retirada") {
+          throw new HttpError(400, "Esse cupom é de frete grátis — não se aplica à retirada.");
+        }
+        cupomFreteGratis = true;
+      }
+    }
+
+    // Forma de pagamento — precisa estar habilitada no site; parcelas dentro do limite dela.
+    const formaPagamento = await prisma.formaPagamento.findFirst({
+      where: { empresaId: empresa.id, codigo: data.formaPagamento.codigo, usaNoSite: true },
+    });
+    if (!formaPagamento) throw new HttpError(400, "Forma de pagamento inválida.");
+    if (data.formaPagamento.parcelas > formaPagamento.maximoParcelas) {
+      throw new HttpError(400, "Número de parcelas inválido para essa forma de pagamento.");
+    }
+
+    // Desconto por forma de pagamento (Pix/Dinheiro/Ambos) configurado no admin.
+    let descontoPagamentoValor = 0;
+    if (empresa.descontoFormaPagamento && empresa.descontoPercentual) {
+      const aplica =
+        empresa.descontoFormaPagamento === "AMBOS" ||
+        empresa.descontoFormaPagamento === formaPagamento.codigo;
+      if (aplica) descontoPagamentoValor = (subtotal * Number(empresa.descontoPercentual)) / 100;
+    }
+
+    const freteGratisEfetivo =
+      data.tipoOperacao === "entrega" && (empresa.bairrosFreteGratis || cupomFreteGratis);
+    const freteFinal = freteGratisEfetivo ? 0 : freteValor;
+    const total = Math.max(0, subtotal - descontoCupomValor - descontoPagamentoValor) + freteFinal;
+
+    const pedido = await prisma.$transaction(async (tx) => {
+      const empresaAtualizada = await tx.empresa.update({
+        where: { id: empresa.id },
+        data: { ultimoPedidoNumero: { increment: 1 } },
+      });
+
+      const criado = await tx.pedido.create({
+        data: {
+          empresaId: empresa.id,
+          numero: empresaAtualizada.ultimoPedidoNumero,
+          clienteCpfCnpj: apenasDigitos(data.cliente.cpfCnpj),
+          clienteNome: data.cliente.nome,
+          clienteRazaoSocial: data.cliente.razaoSocial || null,
+          clienteInscricaoEstadual: data.cliente.inscricaoEstadual || null,
+          tipoOperacao: data.tipoOperacao === "entrega" ? "ENTREGA" : "RETIRADA",
+          enderecoCep: data.endereco?.cep ?? null,
+          enderecoRua: data.endereco?.rua ?? null,
+          enderecoNumero: data.endereco?.numero ?? null,
+          enderecoReferencia: data.endereco?.referencia || null,
+          enderecoBairro: bairro?.nome ?? data.endereco?.bairroNome ?? null,
+          enderecoCidade: data.endereco?.cidade ?? null,
+          enderecoEstado: data.endereco?.estado ?? null,
+          bairroId: bairro?.id ?? null,
+          cupomId: cupom?.id ?? null,
+          cupomCodigo: cupom?.codigo ?? null,
+          status: empresa.autoAceitarPedidos ? "ACEITO" : "EM_PROCESSAMENTO",
+          subtotal,
+          descontoCupomValor,
+          descontoPagamentoValor,
+          freteValor: freteFinal,
+          total,
+          itens: { create: itensResolvidos },
+          // Hoje é sempre um único pagamento (o checkout não permite dividir
+          // entre formas) — em tabela separada já pensando em split futuro.
+          pagamentos: {
+            create: {
+              formaPagamentoCodigo: formaPagamento.codigo,
+              formaPagamentoNome: formaPagamento.nome,
+              parcelas: data.formaPagamento.parcelas,
+              valor: total,
+            },
+          },
+        },
+        include: { pagamentos: true },
+      });
+
+      if (cupom) {
+        await tx.cupom.update({ where: { id: cupom.id }, data: { usosRealizados: { increment: 1 } } });
+      }
+
+      return criado;
+    });
+
+    res.status(201).json(toPublicPedido(pedido));
+  }),
+);
+
+const avaliacaoSchema = z.object({
+  nota: z.number().int().min(1).max(5),
+  comentario: z.string().trim().max(190).nullable().optional(),
+});
+
+// Pública — o cliente avalia o próprio pedido depois de recebido. Sem
+// conta/login no site, então quem sabe o id (cuid, não sequencial) do
+// próprio pedido pode avaliar — id + slug juntos evitam avaliar um pedido de
+// outra loja mesmo que o id vaze.
+router.patch(
+  "/publico/:slug/:id/avaliacao",
+  asyncHandler(async (req, res) => {
+    const empresa = await prisma.empresa.findUnique({ where: { slug: req.params.slug } });
+    if (!empresa) throw new HttpError(404, "Loja não encontrada.");
+
+    const data = avaliacaoSchema.parse(req.body);
+
+    const pedido = await prisma.pedido.findFirst({
+      where: { id: req.params.id, empresaId: empresa.id },
+    });
+    if (!pedido) throw new HttpError(404, "Pedido não encontrado.");
+
+    await prisma.pedido.update({
+      where: { id: pedido.id },
+      data: { nota: data.nota, comentario: data.comentario || null },
+    });
+
+    res.status(204).end();
+  }),
+);
+
+// Pública — só o status atual, pra tela "Meus pedidos" ficar sincronizando
+// (poll) enquanto o pedido está em processamento, sem expor os dados
+// completos de novo a cada consulta.
+router.get(
+  "/publico/:slug/:id/status",
+  asyncHandler(async (req, res) => {
+    const empresa = await prisma.empresa.findUnique({ where: { slug: req.params.slug } });
+    if (!empresa) throw new HttpError(404, "Loja não encontrada.");
+
+    const pedido = await prisma.pedido.findFirst({
+      where: { id: req.params.id, empresaId: empresa.id },
+      select: { status: true },
+    });
+    if (!pedido) throw new HttpError(404, "Pedido não encontrado.");
+
+    res.json({ status: pedido.status });
+  }),
+);
+
+// A partir daqui, tudo exige login de admin da loja.
+router.use(authenticate, requireRole("ADM"));
+
+function toAdminPedido(pedido) {
+  return {
+    id: pedido.id,
+    numero: pedido.numero,
+    status: pedido.status,
+    statusEnvioErp: pedido.statusEnvioErp,
+    tipoOperacao: pedido.tipoOperacao,
+    cliente: {
+      nome: pedido.clienteNome,
+      cpfCnpj: pedido.clienteCpfCnpj,
+      razaoSocial: pedido.clienteRazaoSocial,
+      inscricaoEstadual: pedido.clienteInscricaoEstadual,
+    },
+    endereco:
+      pedido.tipoOperacao === "ENTREGA"
+        ? {
+            cep: pedido.enderecoCep,
+            rua: pedido.enderecoRua,
+            numero: pedido.enderecoNumero,
+            referencia: pedido.enderecoReferencia,
+            bairro: pedido.enderecoBairro,
+            cidade: pedido.enderecoCidade,
+            estado: pedido.enderecoEstado,
+          }
+        : null,
+    cupomCodigo: pedido.cupomCodigo,
+    nota: pedido.nota,
+    comentario: pedido.comentario,
+    subtotal: pedido.subtotal.toString(),
+    descontoCupomValor: pedido.descontoCupomValor.toString(),
+    descontoPagamentoValor: pedido.descontoPagamentoValor.toString(),
+    freteValor: pedido.freteValor.toString(),
+    total: pedido.total.toString(),
+    itens: pedido.itens.map((i) => ({
+      produtoCodigo: i.produtoCodigo,
+      descricao: i.descricao,
+      grupoNome: i.grupoNome,
+      precoUnitario: i.precoUnitario.toString(),
+      quantidade: i.quantidade.toString(),
+      precoTotal: i.precoTotal.toString(),
+    })),
+    pagamentos: pedido.pagamentos.map((p) => ({
+      formaPagamentoCodigo: p.formaPagamentoCodigo,
+      formaPagamentoNome: p.formaPagamentoNome,
+      parcelas: p.parcelas,
+      valor: p.valor.toString(),
+    })),
+    createdAt: pedido.createdAt.toISOString(),
+  };
+}
+
+// Admin — liga/desliga o aceite automático de pedidos novos (tela Pedidos).
+router.get(
+  "/config",
+  asyncHandler(async (req, res) => {
+    const empresa = await prisma.empresa.findUnique({
+      where: { id: req.auth.empresaId },
+      select: { autoAceitarPedidos: true },
+    });
+    res.json({ autoAceitarPedidos: empresa.autoAceitarPedidos });
+  }),
+);
+
+router.patch(
+  "/config",
+  asyncHandler(async (req, res) => {
+    const { autoAceitarPedidos } = z.object({ autoAceitarPedidos: z.boolean() }).parse(req.body);
+    const empresa = await prisma.empresa.update({
+      where: { id: req.auth.empresaId },
+      data: { autoAceitarPedidos },
+      select: { autoAceitarPedidos: true },
+    });
+    res.json({ autoAceitarPedidos: empresa.autoAceitarPedidos });
+  }),
+);
+
+// Admin — fila de pedidos aguardando aceite/recusa. Sem paginação: com
+// autoAceitarPedidos ligado (padrão) essa lista tende a ficar vazia, e
+// mesmo desligado é o tipo de lista que a loja precisa ver por inteiro, não
+// aos pedaços.
+router.get(
+  "/aguardando",
+  asyncHandler(async (req, res) => {
+    const pedidos = await prisma.pedido.findMany({
+      where: { empresaId: req.auth.empresaId, status: "EM_PROCESSAMENTO" },
+      include: { itens: true, pagamentos: true },
+      orderBy: { numero: "desc" },
+    });
+    res.json(pedidos.map(toAdminPedido));
+  }),
+);
+
+const PEDIDOS_PAGINA_PADRAO = 20;
+const PEDIDOS_PAGINA_MAXIMA = 40;
+
+// Admin — histórico completo (aba "Todos os Pedidos"), paginado por cursor
+// (número do pedido, sequencial por loja) em vez de offset/página, pra não
+// degradar conforme o histórico cresce — mesma lógica de
+// /produtos/publico/:slug/produtos.
+router.get(
+  "/",
+  asyncHandler(async (req, res) => {
+    const limiteQuery = Number(req.query.limit);
+    const limite =
+      Number.isInteger(limiteQuery) && limiteQuery > 0 && limiteQuery <= PEDIDOS_PAGINA_MAXIMA
+        ? limiteQuery
+        : PEDIDOS_PAGINA_PADRAO;
+
+    const cursorNumero = req.query.cursor != null ? Number(req.query.cursor) : null;
+    const temCursor = cursorNumero != null && Number.isInteger(cursorNumero);
+
+    const pedidos = await prisma.pedido.findMany({
+      where: { empresaId: req.auth.empresaId },
+      include: { itens: true, pagamentos: true },
+      orderBy: { numero: "desc" },
+      take: limite + 1,
+      ...(temCursor
+        ? {
+            cursor: { empresaId_numero: { empresaId: req.auth.empresaId, numero: cursorNumero } },
+            skip: 1,
+          }
+        : {}),
+    });
+
+    const temMais = pedidos.length > limite;
+    const pagina = temMais ? pedidos.slice(0, limite) : pedidos;
+
+    res.json({
+      itens: pagina.map(toAdminPedido),
+      proximoCursor: temMais ? pagina[pagina.length - 1].numero : null,
+    });
+  }),
+);
+
+// Admin — média e total de avaliações (cartão de resumo da tela Avaliações).
+router.get(
+  "/avaliacoes/resumo",
+  asyncHandler(async (req, res) => {
+    const resultado = await prisma.pedido.aggregate({
+      where: { empresaId: req.auth.empresaId, nota: { not: null } },
+      _avg: { nota: true },
+      _count: { nota: true },
+    });
+    res.json({
+      media: resultado._avg.nota != null ? Math.round(resultado._avg.nota * 10) / 10 : 0,
+      total: resultado._count.nota,
+    });
+  }),
+);
+
+// Admin — lista de avaliações, paginada por cursor (mesma lógica de "/").
+router.get(
+  "/avaliacoes",
+  asyncHandler(async (req, res) => {
+    const limiteQuery = Number(req.query.limit);
+    const limite =
+      Number.isInteger(limiteQuery) && limiteQuery > 0 && limiteQuery <= PEDIDOS_PAGINA_MAXIMA
+        ? limiteQuery
+        : PEDIDOS_PAGINA_PADRAO;
+
+    const cursorNumero = req.query.cursor != null ? Number(req.query.cursor) : null;
+    const temCursor = cursorNumero != null && Number.isInteger(cursorNumero);
+
+    const pedidos = await prisma.pedido.findMany({
+      where: { empresaId: req.auth.empresaId, nota: { not: null } },
+      select: { id: true, numero: true, clienteNome: true, nota: true, comentario: true, createdAt: true },
+      orderBy: { numero: "desc" },
+      take: limite + 1,
+      ...(temCursor
+        ? {
+            cursor: { empresaId_numero: { empresaId: req.auth.empresaId, numero: cursorNumero } },
+            skip: 1,
+          }
+        : {}),
+    });
+
+    const temMais = pedidos.length > limite;
+    const pagina = temMais ? pedidos.slice(0, limite) : pedidos;
+
+    res.json({
+      itens: pagina.map((p) => ({
+        id: p.id,
+        numero: p.numero,
+        clienteNome: p.clienteNome,
+        nota: p.nota,
+        comentario: p.comentario,
+        createdAt: p.createdAt.toISOString(),
+      })),
+      proximoCursor: temMais ? pagina[pagina.length - 1].numero : null,
+    });
+  }),
+);
+
+// De onde cada status manual pode partir — só a partir daí que o botão
+// correspondente aparece no admin.
+const STATUS_TRANSICOES_MANUAIS = {
+  ACEITO: ["EM_PROCESSAMENTO"],
+  CANCELADO: ["EM_PROCESSAMENTO", "ACEITO"],
+};
+
+// Admin — aceitar/recusar um pedido em "Em processamento". "ACEITO" aqui só
+// atualiza o status no nosso banco; postar de fato pro ERP (o que vai gerar
+// statusEnvioErp=ENVIADO/erpPedidoId) é uma fase futura, ainda não
+// implementada — por ora esse botão só confirma o pedido no nosso lado.
+router.patch(
+  "/:id/status",
+  asyncHandler(async (req, res) => {
+    const { status } = z.object({ status: z.enum(["ACEITO", "CANCELADO"]) }).parse(req.body);
+
+    const pedido = await prisma.pedido.findFirst({
+      where: { id: req.params.id, empresaId: req.auth.empresaId },
+    });
+    if (!pedido) throw new HttpError(404, "Pedido não encontrado.");
+
+    if (!STATUS_TRANSICOES_MANUAIS[status].includes(pedido.status)) {
+      throw new HttpError(400, `Não é possível mudar de "${pedido.status}" para "${status}".`);
+    }
+
+    const atualizado = await prisma.pedido.update({
+      where: { id: pedido.id },
+      data: { status },
+      include: { itens: true, pagamentos: true },
+    });
+
+    res.json(toAdminPedido(atualizado));
+  }),
+);
+
+module.exports = router;

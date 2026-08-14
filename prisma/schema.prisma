@@ -1,0 +1,431 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  SUPER
+  ADM
+  USUARIO
+}
+
+model Empresa {
+  id            String    @id @default(cuid())
+  codigoId      String    @unique
+  nome          String
+  empresaCodigo String
+  slug          String    @unique
+  ativo         Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  usuarios      Usuario[]
+
+  // Integração com o ERP beijaflor
+  identificacaoApi    String?          @unique
+  erpLoginCifrado     String?
+  erpSenhaCifrada     String?
+  erpTokenAcesso      String?
+  erpDados            Json?
+  ultimaSincronizacao DateTime?
+  vendedores          Vendedor[]
+  formasPagamento     FormaPagamento[]
+
+  // Configurações da loja (onboarding passo 2)
+  vendedorPadraoCodigo      Int?
+  tabelaDePrecoPadraoCodigo Int?
+  horarios                  Json?
+  contatoEmail              String?
+  contatoTelefone           String?
+  contatoWhatsapp           String?
+  lojaFechada               Boolean  @default(false)
+  pedidoMinimo              Decimal? @db.Decimal(10, 2)
+  corPrimaria               String?
+  logo                      Bytes?
+  logoMimeType              String?
+  logoThumb                 Bytes?
+  permiteEntrega            Boolean  @default(true)
+  permiteRetirada           Boolean  @default(true)
+
+  // Maior "MaximoParcelas" entre as formas de pagamento ativas no site —
+  // recalculado a cada sincronização e a cada toggle de usaNoSite, para
+  // não precisar consultar FormaPagamento toda vez que a loja for exibida.
+  maximoParcelas Int?
+
+  // Desconto por forma de pagamento (Pix ou dinheiro) — aplica-se às formas
+  // de pagamento sincronizadas do ERP cujo código seja "PIX" ou "DIN".
+  descontoFormaPagamento String? // "PIX" | "DIN"
+  descontoPercentual     Decimal? @db.Decimal(5, 2)
+
+  // Quantidade mínima (e passo de incremento) para adicionar um produto ao
+  // pedido — usado por lojas que vendem por peso/fração (ex.: hortifruti,
+  // "CasasDecimaisQuantidade" > 2 no beijaflor ERP). Ex.: 0.100 = 100g.
+  quantidadeMinima Decimal? @db.Decimal(10, 3)
+
+  // Bairros / entrega (onboarding passo 3)
+  bairrosFreteGratis Boolean  @default(false)
+  freteGratisAcimaDe Decimal? @db.Decimal(10, 2)
+  // Taxa aplicada no checkout quando o bairro devolvido pela busca de CEP/CNPJ
+  // não está cadastrado na loja — sem isso, um bairro novo/fora da lista
+  // travaria o cliente (o campo bairro é obrigatório pra calcular o frete).
+  valorPadraoFrete Decimal? @db.Decimal(10, 2)
+  bairros          Bairro[]
+
+  produtos Produto[]
+
+  tabelasDePrecos TabelaDePrecos[]
+
+  cupons Cupom[]
+
+  clientes Cliente[]
+
+  // Numeração sequencial e amigável dos pedidos ("#42"), incrementada
+  // atomicamente (update com increment) a cada pedido criado.
+  ultimoPedidoNumero Int       @default(0)
+  pedidos            Pedido[]
+
+  // Quando true, todo pedido novo já nasce com status ACEITO em vez de
+  // EM_PROCESSAMENTO — pula a fila "Aguardando" do admin. Vem true por
+  // padrão pra loja não precisar aceitar manualmente cada pedido desde o
+  // primeiro dia; quem quiser revisar antes é que desliga.
+  autoAceitarPedidos Boolean @default(true)
+}
+
+model Vendedor {
+  id        String   @id @default(cuid())
+  empresaId String
+  empresa   Empresa  @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+  codigo    Int
+  nome      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([empresaId, codigo])
+}
+
+model FormaPagamento {
+  id             String   @id @default(cuid())
+  empresaId      String
+  empresa        Empresa  @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+  codigo         String
+  nome           String
+  maximoParcelas Int
+  usaNoSite      Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([empresaId, codigo])
+}
+
+model Bairro {
+  id        String   @id @default(cuid())
+  empresaId String
+  empresa   Empresa  @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+  estado    String   @db.Char(2)
+  nome      String
+  cidade    String
+  valor     Decimal  @db.Decimal(10, 2)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  pedidos Pedido[]
+}
+
+model Produto {
+  id        String  @id @default(cuid())
+  empresaId String
+  empresa   Empresa @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+  codigo    Int
+
+  descricao        String
+  codigoBarras     String?
+  codigoOriginal   String?
+  codigoFabricante String?
+  unidade          String
+  grupoNome        String?
+  informacoes      String? @db.Text
+
+  precoUnitario      Decimal @db.Decimal(12, 5)
+  precoNormal        Decimal @db.Decimal(12, 5)
+  precoPromocional   Decimal @db.Decimal(12, 5)
+  custoUnitario      Decimal @db.Decimal(12, 4)
+  porcDescontoMaximo Decimal @db.Decimal(5, 2)
+  saldo              Decimal @db.Decimal(12, 3)
+  peso               Decimal @db.Decimal(12, 4)
+  tara               Decimal @db.Decimal(12, 4)
+
+  ativo     Boolean @default(true)
+  usaNoSite Boolean @default(true)
+  destaque  Boolean @default(false)
+
+  imagem1 String?
+  imagem2 String?
+  imagem3 String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([empresaId, codigo])
+  @@index([empresaId, ativo, usaNoSite, grupoNome])
+  @@index([empresaId, ativo, usaNoSite, destaque])
+}
+
+model Cliente {
+  id        String  @id @default(cuid())
+  empresaId String
+  empresa   Empresa @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+  codigo    Int
+
+  nome                String
+  razaoSocial         String?
+  cnpjCpf             String?
+  endereco            String?
+  enderecoNumero      String?
+  enderecoComplemento String?
+  bairro              String?
+  cidade              String?
+  uf                  String?
+  telefone            String?
+  ativo               Boolean @default(true)
+  tabelaDePrecoCodigo Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([empresaId, codigo])
+}
+
+model TabelaDePrecos {
+  id        String  @id @default(cuid())
+  empresaId String
+  empresa   Empresa @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+
+  // Chave natural do ERP — é através dela que um item (TabelaDePrecosItem)
+  // se relaciona com o cabeçalho: item.grupoDeEmpresaId + item.empresaCodigo
+  // + item.tabelaDePrecosCodigo == cabeçalho.grupoDeEmpresaId +
+  // cabeçalho.empresaCodigo + cabeçalho.codigo.
+  grupoDeEmpresaId Int
+  empresaCodigo    Int
+  codigo           Int
+
+  tipoDeParticipanteCodigo    Int
+  descricao                   String
+  descricaoTipoDeParticipante String?
+  dataValidade                DateTime?
+  dataValidadeConsulta        DateTime?
+
+  itens TabelaDePrecosItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([grupoDeEmpresaId, empresaCodigo, codigo])
+  @@index([empresaId])
+}
+
+model TabelaDePrecosItem {
+  id               String         @id @default(cuid())
+  tabelaDePrecosId String
+  tabelaDePrecos   TabelaDePrecos @relation(fields: [tabelaDePrecosId], references: [id], onDelete: Cascade)
+
+  // Mesma chave natural do cabeçalho, replicada aqui como veio do ERP.
+  grupoDeEmpresaId     Int
+  empresaCodigo        Int
+  tabelaDePrecosCodigo Int
+
+  idErp         Int
+  produtoCodigo Int
+  valor         Decimal @db.Decimal(12, 4)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([grupoDeEmpresaId, empresaCodigo, idErp])
+  @@index([tabelaDePrecosId])
+  @@index([produtoCodigo])
+}
+
+enum TipoCupom {
+  VALOR
+  PERCENTUAL
+  FRETE_GRATIS
+}
+
+model Cupom {
+  id        String  @id @default(cuid())
+  empresaId String
+  empresa   Empresa @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+
+  codigo    String
+  descricao String?
+  tipo      TipoCupom
+
+  // Nulo quando tipo = FRETE_GRATIS (não se aplica).
+  valor Decimal? @db.Decimal(10, 2)
+
+  valorCompraMinima Decimal?  @db.Decimal(10, 2)
+  dataVencimento    DateTime?
+  ativo             Boolean   @default(true)
+
+  // Nulo = sem limite de uso.
+  limiteUsos     Int?
+  usosRealizados Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  pedidos Pedido[]
+
+  @@unique([empresaId, codigo])
+}
+
+enum TipoOperacaoPedido {
+  ENTREGA
+  RETIRADA
+}
+
+// EM_PROCESSAMENTO: acabou de ser gravado no nosso banco, ainda não foi
+// enviado pro ERP beijaflor. ACEITO: já foi postado com sucesso na API do
+// ERP (ver StatusEnvioErp/erpPedidoId) — a partir daí o fluxo de separação/
+// entrega passa a ser acompanhado por aqui manualmente, já que o ERP não
+// devolve status depois do envio.
+enum StatusPedido {
+  EM_PROCESSAMENTO
+  ACEITO
+  SEPARANDO
+  EM_ROTA
+  ENTREGUE
+  CANCELADO
+}
+
+// Status do envio para o ERP beijaflor — o pedido é sempre gravado aqui
+// primeiro (fonte da verdade pro dashboard); o envio pro ERP é uma etapa
+// separada e re-tentável (fase futura), nunca bloqueia a criação do pedido.
+enum StatusEnvioErp {
+  PENDENTE
+  ENVIADO
+  ERRO
+}
+
+model Pedido {
+  id        String  @id @default(cuid())
+  empresaId String
+  empresa   Empresa @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+  // Sequencial por loja (Empresa.ultimoPedidoNumero) — número amigável pro cliente ("Pedido #42").
+  numero    Int
+
+  clienteCpfCnpj           String
+  clienteNome              String
+  clienteRazaoSocial       String?
+  clienteInscricaoEstadual String?
+
+  tipoOperacao TipoOperacaoPedido
+
+  // Endereço — nulo quando tipoOperacao = RETIRADA. Guardado como veio no
+  // pedido (não como referência viva a Bairro), pra manter o histórico
+  // correto mesmo se o cadastro de bairro mudar depois.
+  enderecoCep        String?
+  enderecoRua        String?
+  enderecoNumero     String?
+  enderecoReferencia String?
+  enderecoBairro     String?
+  enderecoCidade     String?
+  enderecoEstado     String?
+  bairroId           String?
+  bairro             Bairro? @relation(fields: [bairroId], references: [id], onDelete: SetNull)
+
+  cupomId     String?
+  cupom       Cupom?  @relation(fields: [cupomId], references: [id], onDelete: SetNull)
+  cupomCodigo String?
+
+  subtotal              Decimal @db.Decimal(12, 2)
+  descontoCupomValor     Decimal @default(0) @db.Decimal(12, 2)
+  descontoPagamentoValor Decimal @default(0) @db.Decimal(12, 2)
+  freteValor             Decimal @default(0) @db.Decimal(12, 2)
+  total                  Decimal @db.Decimal(12, 2)
+
+  status         StatusPedido   @default(EM_PROCESSAMENTO)
+  statusEnvioErp StatusEnvioErp @default(PENDENTE)
+  erpPedidoId    String?
+  erpErro        String?        @db.Text
+
+  // Avaliação do cliente (1 a 5) — não há conta/login no site, então quem
+  // sabe o id (cuid, não sequencial/adivinhável) do próprio pedido pode
+  // avaliar; é o mesmo modelo de "link opaco" usado em confirmação de pedido.
+  nota       Int?
+  comentario String? @db.Text
+
+  itens      PedidoItem[]
+  // Hoje sempre 1 registro (o checkout só permite uma forma de pagamento por
+  // pedido) — separado do Pedido já pensando em pagamento dividido no
+  // futuro (ex.: parte no cartão, parte no pix), sem precisar migrar de novo.
+  pagamentos PedidoPagamento[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([empresaId, numero])
+  @@index([empresaId, createdAt])
+  @@index([empresaId, status])
+}
+
+model PedidoPagamento {
+  id       String @id @default(cuid())
+  pedidoId String
+  pedido   Pedido @relation(fields: [pedidoId], references: [id], onDelete: Cascade)
+
+  formaPagamentoCodigo String
+  formaPagamentoNome   String
+  parcelas             Int     @default(1)
+  // Valor pago por essa forma — hoje sempre igual ao total do pedido
+  // (pagamento único); com split no futuro, a soma dos pagamentos de um
+  // pedido deve bater com Pedido.total.
+  valor                Decimal @db.Decimal(12, 2)
+
+  createdAt DateTime @default(now())
+
+  @@index([pedidoId])
+}
+
+model PedidoItem {
+  id       String @id @default(cuid())
+  pedidoId String
+  pedido   Pedido @relation(fields: [pedidoId], references: [id], onDelete: Cascade)
+
+  // Fotografia do produto no momento da compra — nunca uma referência viva a
+  // Produto, pra não corromper o histórico se preço/nome/grupo mudarem depois.
+  produtoCodigo Int
+  descricao     String
+  grupoNome     String?
+  precoUnitario Decimal @db.Decimal(12, 4)
+  // Decimal (não Int) pra já suportar produtos vendidos por fração
+  // (Empresa.quantidadeMinima, ex.: hortifruti — 0.250kg).
+  quantidade    Decimal @db.Decimal(12, 3)
+  precoTotal    Decimal @db.Decimal(12, 2)
+
+  createdAt DateTime @default(now())
+
+  @@index([pedidoId])
+  @@index([produtoCodigo])
+}
+
+model Usuario {
+  id           String   @id @default(cuid())
+  empresaId    String?
+  empresa      Empresa? @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+  role         Role
+  username     String   @unique
+  passwordHash String
+  email        String   @unique
+  ativo        Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Recuperação de senha — só o hash do token fica salvo; o token bruto vai
+  // apenas no link do e-mail e nunca é persistido.
+  resetSenhaTokenHash String?   @unique
+  resetSenhaExpiraEm  DateTime?
+}
