@@ -22,11 +22,11 @@ const { errorHandler } = require("./middleware/errorHandler");
 
 const app = express();
 
-app.use(
-  cors({
-    origin: process.env.CORS_ORIGIN?.split(",") ?? "*",
-  }),
-);
+// Aberto pra qualquer origem — a autenticação é via Bearer token no header
+// (localStorage/sessionStorage no client), nunca cookie, então não existe
+// risco de CSRF por credencial ambiente que uma allowlist de origem evitaria.
+// Evita ter que manter CORS_ORIGIN sincronizado entre local, Vercel e Plesk.
+app.use(cors());
 // Limite maior que o padrão (100kb) para caber a logo da loja, enviada como
 // data URL base64 no corpo JSON.
 app.use(express.json({ limit: "5mb" }));
