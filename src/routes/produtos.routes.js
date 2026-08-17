@@ -11,6 +11,17 @@ const { carregarNotasProdutos, notaDoProduto } = require("../lib/avaliacaoProdut
 
 const router = Router();
 
+// Nomes de grupos que o admin marcou como indisponíveis (switch "Disponível"
+// da tela Grupos de produtos) — usado para excluir esses produtos de toda
+// exposição pública, no mesmo espírito do Produto.usaNoSite.
+async function carregarGruposIndisponiveis(empresaId) {
+  const grupos = await prisma.grupoProduto.findMany({
+    where: { empresaId, disponivel: false },
+    select: { nome: true },
+  });
+  return grupos.map((g) => g.nome);
+}
+
 // Pública — grupos (categorias) distintos entre os produtos visíveis no site
 // dessa loja. Usado para montar a navegação de categorias do storefront sem
 // precisar listar produtos inteiros no client.
@@ -23,12 +34,14 @@ router.get(
     });
     if (!empresa || !empresa.ativo) throw new HttpError(404, "Loja não encontrada.");
 
+    const gruposIndisponiveis = await carregarGruposIndisponiveis(empresa.id);
+
     const grupos = await prisma.produto.findMany({
       where: {
         empresaId: empresa.id,
         ativo: true,
         usaNoSite: true,
-        grupoNome: { not: null },
+        grupoNome: { not: null, notIn: gruposIndisponiveis },
       },
       distinct: ["grupoNome"],
       select: { grupoNome: true },
@@ -53,13 +66,20 @@ router.get(
     if (!empresa || !empresa.ativo) throw new HttpError(404, "Loja não encontrada.");
 
     const tabelaAtiva = await carregarTabelaAtivaDaEmpresa(prisma, empresa);
+    const gruposIndisponiveis = await carregarGruposIndisponiveis(empresa.id);
 
     const produtos = await prisma.produto.findMany({
       where: {
         empresaId: empresa.id,
         ativo: true,
         usaNoSite: true,
-        OR: [{ destaque: true }, { precoPromocional: { gt: 0 } }],
+        // Produto sem grupo (grupoNome null) nunca é afetado pelo filtro de
+        // grupo indisponível — "notIn" sozinho excluiria nulls também, já
+        // que NULL NOT IN (...) nunca é verdadeiro em SQL.
+        ...(gruposIndisponiveis.length > 0
+          ? { OR: [{ grupoNome: null }, { grupoNome: { notIn: gruposIndisponiveis } }] }
+          : {}),
+        AND: { OR: [{ destaque: true }, { precoPromocional: { gt: 0 } }] },
       },
       orderBy: [{ destaque: "desc" }, { descricao: "asc" }],
       take: OFERTAS_LIMITE,
@@ -96,6 +116,7 @@ router.get(
     if (!empresa || !empresa.ativo) throw new HttpError(404, "Loja não encontrada.");
 
     const tabelaAtiva = await carregarTabelaAtivaDaEmpresa(prisma, empresa);
+    const gruposIndisponiveis = await carregarGruposIndisponiveis(empresa.id);
 
     const limiteQuery = Number(req.query.limit);
     const limite =
@@ -130,6 +151,11 @@ router.get(
         ...(grupo ? { grupoNome: { equals: grupo, mode: "insensitive" } } : {}),
         ...(busca ? { descricao: { contains: busca, mode: "insensitive" } } : {}),
         ...(codigos ? { codigo: { in: codigos } } : {}),
+        // Mesma ressalva do endpoint de ofertas: grupoNome null nunca deve
+        // ser excluído pelo notIn.
+        ...(gruposIndisponiveis.length > 0
+          ? { OR: [{ grupoNome: null }, { grupoNome: { notIn: gruposIndisponiveis } }] }
+          : {}),
       },
       orderBy: { codigo: "asc" },
       ...(codigos ? {} : { take: limite + 1 }),
@@ -188,6 +214,14 @@ router.get(
       throw new HttpError(404, "Produto não encontrado.");
     }
 
+    if (produto.grupoNome) {
+      const grupo = await prisma.grupoProduto.findUnique({
+        where: { empresaId_nome: { empresaId: empresa.id, nome: produto.grupoNome } },
+        select: { disponivel: true },
+      });
+      if (grupo && !grupo.disponivel) throw new HttpError(404, "Produto não encontrado.");
+    }
+
     const tabelaAtiva = await carregarTabelaAtivaDaEmpresa(prisma, empresa);
     const { precoFinal } = resolverPrecoProduto(produto, tabelaAtiva);
     const informacoesHtml =
@@ -225,6 +259,17 @@ router.get(
 
     const grupo = typeof req.query.grupo === "string" && req.query.grupo.trim() ? req.query.grupo.trim() : null;
     if (!grupo) {
+      res.json([]);
+      return;
+    }
+
+    // Mesma comparação insensitive usada logo abaixo pra filtrar os produtos
+    // do grupo — "grupo" vem do client, que pode ter normalizado o texto.
+    const grupoRow = await prisma.grupoProduto.findFirst({
+      where: { empresaId: empresa.id, nome: { equals: grupo, mode: "insensitive" } },
+      select: { disponivel: true },
+    });
+    if (grupoRow && !grupoRow.disponivel) {
       res.json([]);
       return;
     }

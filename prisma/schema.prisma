@@ -78,6 +78,7 @@ model Empresa {
   bairros          Bairro[]
 
   produtos Produto[]
+  gruposProdutos GrupoProduto[]
 
   tabelasDePrecos TabelaDePrecos[]
 
@@ -175,6 +176,23 @@ model Produto {
   @@unique([empresaId, codigo])
   @@index([empresaId, ativo, usaNoSite, grupoNome])
   @@index([empresaId, ativo, usaNoSite, destaque])
+}
+
+// Disponibilidade por grupo (categoria) de produto — os grupos em si vêm do
+// ERP (Produto.grupoNome), essa tabela só guarda a preferência do admin de
+// ocultar um grupo inteiro do site, no mesmo espírito do Produto.usaNoSite.
+model GrupoProduto {
+  id        String  @id @default(cuid())
+  empresaId String
+  empresa   Empresa @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+  nome      String
+
+  disponivel Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([empresaId, nome])
 }
 
 model Cliente {
