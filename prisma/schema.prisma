@@ -19,6 +19,9 @@ model Empresa {
   nome          String
   empresaCodigo String
   slug          String    @unique
+  // Obrigatório no cadastro (validado no zod da rota) — coluna tem default
+  // vazio só pra não quebrar empresas já cadastradas antes desse campo existir.
+  parceiroNegocio String  @default("")
   ativo         Boolean   @default(true)
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
@@ -86,6 +89,7 @@ model Empresa {
   // atomicamente (update com increment) a cada pedido criado.
   ultimoPedidoNumero Int       @default(0)
   pedidos            Pedido[]
+  produtoAvaliacoes  ProdutoAvaliacao[]
 
   // Quando true, todo pedido novo já nasce com status ACEITO em vez de
   // EM_PROCESSAMENTO — pula a fila "Aguardando" do admin. Vem true por
@@ -363,6 +367,7 @@ model Pedido {
   // pedido) — separado do Pedido já pensando em pagamento dividido no
   // futuro (ex.: parte no cartão, parte no pix), sem precisar migrar de novo.
   pagamentos PedidoPagamento[]
+  produtoAvaliacoes ProdutoAvaliacao[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -410,6 +415,28 @@ model PedidoItem {
 
   @@index([pedidoId])
   @@index([produtoCodigo])
+}
+
+// Nota que a avaliação de um pedido aplica a cada produto que ele contém —
+// o cliente avalia o pedido uma vez só (Pedido.nota) e essa nota vale pra
+// todo item comprado, sem precisar avaliar produto por produto. Uma linha
+// por (pedido, produto); reavaliar o mesmo pedido atualiza essas linhas em
+// vez de duplicar (ver @@unique). A nota "de exibição" do produto é a média
+// dessas linhas — produto sem nenhuma ainda usa um valor padrão no código,
+// não gravado aqui.
+model ProdutoAvaliacao {
+  id            String   @id @default(cuid())
+  empresaId     String
+  empresa       Empresa  @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+  produtoCodigo Int
+  pedidoId      String
+  pedido        Pedido   @relation(fields: [pedidoId], references: [id], onDelete: Cascade)
+  nota          Int
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([pedidoId, produtoCodigo])
+  @@index([empresaId, produtoCodigo])
 }
 
 model Usuario {

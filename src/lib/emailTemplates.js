@@ -85,4 +85,41 @@ function templateRedefinirSenha({ link, expiraEmHoras = 1 }) {
   return layoutBase({ tituloPreview: "Redefina sua senha da BFStore", conteudoHtml });
 }
 
-module.exports = { templateRedefinirSenha };
+function escaparHtml(texto) {
+  return texto
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function templateContato({ nomeLoja, nome, email, assunto, mensagem }) {
+  const conteudoHtml = `
+    <h1 style="margin:0 0 12px 0; font-family:Arial, Helvetica, sans-serif; font-size:22px; font-weight:700; color:#1a1d22;">
+      Nova mensagem — Fale conosco
+    </h1>
+    <p style="margin:0 0 20px 0; font-family:Arial, Helvetica, sans-serif; font-size:15px; line-height:22px; color:#4a5160;">
+      Você recebeu uma mensagem pelo formulário de contato da ${escaparHtml(nomeLoja)}.
+    </p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 20px 0; border:1px solid #e2e5ea; border-radius:10px; overflow:hidden;">
+      <tr>
+        <td style="padding:12px 16px; background-color:#f7f8fa; font-family:Arial, Helvetica, sans-serif; font-size:13px; color:#8a919e; width:100px;">Nome</td>
+        <td style="padding:12px 16px; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#1a1d22;">${escaparHtml(nome)}</td>
+      </tr>
+      <tr>
+        <td style="padding:12px 16px; background-color:#f7f8fa; font-family:Arial, Helvetica, sans-serif; font-size:13px; color:#8a919e;">E-mail</td>
+        <td style="padding:12px 16px; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#1a1d22;">${escaparHtml(email)}</td>
+      </tr>
+      <tr>
+        <td style="padding:12px 16px; background-color:#f7f8fa; font-family:Arial, Helvetica, sans-serif; font-size:13px; color:#8a919e;">Assunto</td>
+        <td style="padding:12px 16px; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#1a1d22;">${escaparHtml(assunto)}</td>
+      </tr>
+    </table>
+    <p style="margin:0 0 8px 0; font-family:Arial, Helvetica, sans-serif; font-size:13px; color:#8a919e;">Mensagem</p>
+    <p style="margin:0; padding:16px; background-color:#f7f8fa; border-radius:10px; font-family:Arial, Helvetica, sans-serif; font-size:14px; line-height:22px; color:#1a1d22; white-space:pre-wrap;">${escaparHtml(mensagem)}</p>
+  `;
+
+  return layoutBase({ tituloPreview: `Nova mensagem de ${nome} — ${assunto}`, conteudoHtml });
+}
+
+module.exports = { templateRedefinirSenha, templateContato };

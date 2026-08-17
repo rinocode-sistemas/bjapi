@@ -16,6 +16,21 @@ function formatarMoeda(valor) {
   return new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(valor);
 }
 
+// Top N por valor (desc), dobrando o resto em "Outros" — usado nos
+// agregados do dashboard pra nunca estourar a quantidade de barras/fatias
+// de um gráfico categórico.
+function agruparTopN(mapa, n) {
+  const entradas = Array.from(mapa.entries()).sort((a, b) => b[1] - a[1]);
+  const top = entradas.slice(0, n);
+  const resto = entradas.slice(n);
+  const resultado = top.map(([nome, valor]) => ({ nome, valor: Number(valor.toFixed(2)) }));
+  if (resto.length > 0) {
+    const somaResto = resto.reduce((soma, [, v]) => soma + v, 0);
+    resultado.push({ nome: "Outros", valor: Number(somaResto.toFixed(2)) });
+  }
+  return resultado;
+}
+
 const pedidoSchema = z.object({
   tipoOperacao: z.enum(["entrega", "retirada"]),
   cliente: z.object({
@@ -274,13 +289,29 @@ router.patch(
 
     const pedido = await prisma.pedido.findFirst({
       where: { id: req.params.id, empresaId: empresa.id },
+      include: { itens: true },
     });
     if (!pedido) throw new HttpError(404, "Pedido não encontrado.");
 
-    await prisma.pedido.update({
-      where: { id: pedido.id },
-      data: { nota: data.nota, comentario: data.comentario || null },
-    });
+    // Avaliar o pedido avalia, com a mesma nota, todo produto que ele
+    // contém — evita o cliente ter que avaliar item por item. Upsert (não
+    // create) porque reavaliar o mesmo pedido deve atualizar a nota desses
+    // produtos, não empilhar uma linha nova por edição.
+    const codigosUnicos = [...new Set(pedido.itens.map((i) => i.produtoCodigo))];
+
+    await prisma.$transaction([
+      prisma.pedido.update({
+        where: { id: pedido.id },
+        data: { nota: data.nota, comentario: data.comentario || null },
+      }),
+      ...codigosUnicos.map((produtoCodigo) =>
+        prisma.produtoAvaliacao.upsert({
+          where: { pedidoId_produtoCodigo: { pedidoId: pedido.id, produtoCodigo } },
+          create: { empresaId: empresa.id, pedidoId: pedido.id, produtoCodigo, nota: data.nota },
+          update: { nota: data.nota },
+        }),
+      ),
+    ]);
 
     res.status(204).end();
   }),
@@ -497,6 +528,134 @@ router.get(
         createdAt: p.createdAt.toISOString(),
       })),
       proximoCursor: temMais ? pagina[pagina.length - 1].numero : null,
+    });
+  }),
+);
+
+// Admin — agregados pro dashboard (gráficos). Os pedidos da janela são
+// buscados uma vez só e reaproveitados pra várias visões (por dia, por
+// bairro, por cidade); itens e pagamentos vivem em tabelas próprias, então
+// são consultas à parte — 4 idas ao banco no total pro dashboard inteiro.
+// Pedidos CANCELADO nunca entram nos agregados de venda.
+router.get(
+  "/dashboard",
+  asyncHandler(async (req, res) => {
+    const empresaId = req.auth.empresaId;
+    const agora = new Date();
+
+    const inicioMes = new Date(agora.getFullYear(), agora.getMonth(), 1);
+    const ha30Dias = new Date(agora);
+    ha30Dias.setDate(ha30Dias.getDate() - 29);
+    ha30Dias.setHours(0, 0, 0, 0);
+    const inicioJanela = inicioMes < ha30Dias ? inicioMes : ha30Dias;
+
+    const [pedidosJanela, itensJanela, pagamentosJanela, avaliacoesPorNota] = await Promise.all([
+      prisma.pedido.findMany({
+        where: { empresaId, status: { not: "CANCELADO" }, createdAt: { gte: inicioJanela } },
+        select: {
+          createdAt: true,
+          total: true,
+          tipoOperacao: true,
+          enderecoBairro: true,
+          enderecoCidade: true,
+        },
+      }),
+      prisma.pedidoItem.findMany({
+        where: { pedido: { empresaId, status: { not: "CANCELADO" }, createdAt: { gte: ha30Dias } } },
+        select: { grupoNome: true, precoTotal: true },
+      }),
+      prisma.pedidoPagamento.findMany({
+        where: { pedido: { empresaId, status: { not: "CANCELADO" }, createdAt: { gte: ha30Dias } } },
+        select: { formaPagamentoNome: true, valor: true },
+      }),
+      prisma.pedido.groupBy({
+        by: ["nota"],
+        where: { empresaId, nota: { not: null } },
+        _count: { nota: true },
+      }),
+    ]);
+
+    // Pedidos por dia — últimos 30 dias, com todo dia presente (mesmo com 0).
+    const diasPorData = new Map();
+    for (let i = 0; i < 30; i++) {
+      const d = new Date(ha30Dias);
+      d.setDate(d.getDate() + i);
+      const chave = d.toISOString().slice(0, 10);
+      diasPorData.set(chave, { data: chave, pedidos: 0, faturamento: 0 });
+    }
+    for (const p of pedidosJanela) {
+      if (p.createdAt < ha30Dias) continue;
+      const bucket = diasPorData.get(p.createdAt.toISOString().slice(0, 10));
+      if (!bucket) continue;
+      bucket.pedidos += 1;
+      bucket.faturamento += Number(p.total);
+    }
+    const pedidosPorDia = Array.from(diasPorData.values()).map((b) => ({
+      data: b.data,
+      pedidos: b.pedidos,
+      faturamento: b.faturamento.toFixed(2),
+    }));
+
+    // Faturamento por dia — mês corrente, só até hoje.
+    const ultimoDiaMes = new Date(agora.getFullYear(), agora.getMonth() + 1, 0).getDate();
+    const diaDeHoje = agora.getDate();
+    const diasDoMes = new Map();
+    for (let dia = 1; dia <= diaDeHoje; dia++) diasDoMes.set(dia, 0);
+    for (const p of pedidosJanela) {
+      if (p.createdAt < inicioMes) continue;
+      const dia = p.createdAt.getDate();
+      if (!diasDoMes.has(dia)) continue;
+      diasDoMes.set(dia, diasDoMes.get(dia) + Number(p.total));
+    }
+    const vendasPorDiaNoMes = Array.from(diasDoMes.entries()).map(([dia, valor]) => ({
+      dia,
+      valor: valor.toFixed(2),
+    }));
+
+    // Vendas por grupo de produtos — últimos 30 dias.
+    const vendasPorGrupoMap = new Map();
+    for (const item of itensJanela) {
+      const grupo = item.grupoNome?.trim().toUpperCase() || "SEM GRUPO";
+      vendasPorGrupoMap.set(grupo, (vendasPorGrupoMap.get(grupo) ?? 0) + Number(item.precoTotal));
+    }
+
+    // Formas de pagamento — últimos 30 dias.
+    const formasPagamentoMap = new Map();
+    for (const p of pagamentosJanela) {
+      formasPagamentoMap.set(
+        p.formaPagamentoNome,
+        (formasPagamentoMap.get(p.formaPagamentoNome) ?? 0) + Number(p.valor),
+      );
+    }
+
+    // Avaliações — todo o histórico (são poucas, não faz sentido limitar a 30 dias).
+    const avaliacoes = [1, 2, 3, 4, 5].map((nota) => ({
+      nota,
+      quantidade: avaliacoesPorNota.find((a) => a.nota === nota)?._count.nota ?? 0,
+    }));
+
+    // Pedidos por bairro/cidade — últimos 30 dias, só entregas (retirada não
+    // tem endereço). Maiúscula/minúscula normalizada no agrupamento (o
+    // endereço vem de fontes diferentes — CEP, CNPJ, digitado — então
+    // "Centro" e "CENTRO" são o mesmo bairro, não dois).
+    const bairroMap = new Map();
+    const cidadeMap = new Map();
+    for (const p of pedidosJanela) {
+      if (p.tipoOperacao !== "ENTREGA" || p.createdAt < ha30Dias) continue;
+      const bairro = p.enderecoBairro?.trim().toUpperCase();
+      if (bairro) bairroMap.set(bairro, (bairroMap.get(bairro) ?? 0) + 1);
+      const cidade = p.enderecoCidade?.trim().toUpperCase();
+      if (cidade) cidadeMap.set(cidade, (cidadeMap.get(cidade) ?? 0) + 1);
+    }
+
+    res.json({
+      pedidosPorDia,
+      vendasPorDiaNoMes,
+      vendasPorGrupo: agruparTopN(vendasPorGrupoMap, 6),
+      formasPagamento: agruparTopN(formasPagamentoMap, 6),
+      avaliacoes,
+      pedidosPorBairro: agruparTopN(bairroMap, 8),
+      pedidosPorCidade: agruparTopN(cidadeMap, 8),
     });
   }),
 );

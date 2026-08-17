@@ -7,6 +7,7 @@ const { authenticate, requireRole } = require("../middleware/auth");
 const { carregarTabelaAtivaDaEmpresa, resolverPrecoProduto } = require("../lib/precoResolver");
 const { imagemValida } = require("../lib/imagemProduto");
 const { sanitizarHtml, paraTextoPuro } = require("../lib/sanitizarHtml");
+const { carregarNotasProdutos, notaDoProduto } = require("../lib/avaliacaoProduto");
 
 const router = Router();
 
@@ -139,6 +140,11 @@ router.get(
 
     const temMais = !codigos && produtos.length > limite;
     const pagina = temMais ? produtos.slice(0, limite) : produtos;
+    const mapaNotas = await carregarNotasProdutos(
+      prisma,
+      empresa.id,
+      pagina.map((p) => p.codigo),
+    );
 
     res.json({
       itens: pagina.map((produto) => {
@@ -155,6 +161,7 @@ router.get(
           precoNormal: produto.precoNormal.toString(),
           precoFinal: precoFinal.toString(),
           temDesconto: Number(precoFinal) < Number(produto.precoNormal),
+          rating: notaDoProduto(mapaNotas, produto.codigo),
         };
       }),
       proximoCursor: temMais ? pagina[pagina.length - 1].codigo : null,

@@ -16,6 +16,7 @@ const onboardingRoutes = require("./routes/onboarding.routes");
 const cuponsRoutes = require("./routes/cupons.routes");
 const cnpjRoutes = require("./routes/cnpj.routes");
 const pedidosRoutes = require("./routes/pedidos.routes");
+const contatoRoutes = require("./routes/contato.routes");
 const { errorHandler } = require("./middleware/errorHandler");
 
 const app = express();
@@ -48,6 +49,7 @@ app.use("/api/onboarding", onboardingRoutes);
 app.use("/api/cupons", cuponsRoutes);
 app.use("/api/cnpj", cnpjRoutes);
 app.use("/api/pedidos", pedidosRoutes);
+app.use("/api/contato", contatoRoutes);
 
 app.use((_req, res) => {
   res.status(404).json({ message: "Rota não encontrada." });

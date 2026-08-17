@@ -39,6 +39,8 @@ router.get(
       pedidoMinimo: empresa.pedidoMinimo?.toString() ?? null,
       valorPadraoFrete: empresa.valorPadraoFrete?.toString() ?? null,
       contatoWhatsapp: empresa.contatoWhatsapp,
+      contatoEmail: empresa.contatoEmail,
+      contatoTelefone: empresa.contatoTelefone,
     });
   }),
 );
@@ -161,6 +163,7 @@ const empresaBaseFields = {
   nome: z.string().trim().min(1),
   empresaCodigo: z.string().trim().min(1),
   slug: z.string().trim().min(1),
+  parceiroNegocio: z.string().trim().min(1, "Informe o parceiro de negócio."),
   usuarioAdm: z.string().trim().min(1),
   emailRecuperacao: z.string().trim().email(),
   ativo: z.boolean().optional().default(true),
@@ -192,6 +195,7 @@ function toPublicEmpresa(empresa) {
     nome: empresa.nome,
     empresaCodigo: empresa.empresaCodigo,
     slug: empresa.slug,
+    parceiroNegocio: empresa.parceiroNegocio,
     usuarioAdm: adm?.username ?? "",
     senha: "",
     emailRecuperacao: adm?.email ?? "",
@@ -234,6 +238,7 @@ router.post(
           nome: data.nome,
           empresaCodigo: data.empresaCodigo,
           slug: data.slug,
+          parceiroNegocio: data.parceiroNegocio,
           ativo: data.ativo,
         },
       });
@@ -280,6 +285,7 @@ router.put(
           ...(data.nome !== undefined && { nome: data.nome }),
           ...(data.empresaCodigo !== undefined && { empresaCodigo: data.empresaCodigo }),
           ...(data.slug !== undefined && { slug: data.slug }),
+          ...(data.parceiroNegocio !== undefined && { parceiroNegocio: data.parceiroNegocio }),
           ...(data.ativo !== undefined && { ativo: data.ativo }),
         },
       });
