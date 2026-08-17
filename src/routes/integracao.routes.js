@@ -15,6 +15,7 @@ const {
 const { HttpError } = require("../lib/httpError");
 const { asyncHandler } = require("../lib/asyncHandler");
 const { authenticate, requireRole } = require("../middleware/auth");
+const { upsertEmLote } = require("../lib/upsertLote");
 
 const router = Router();
 
@@ -139,33 +140,64 @@ router.post(
       throw err;
     }
 
-    await prisma.$transaction([
-      ...vendedoresErp.map((v) =>
-        prisma.vendedor.upsert({
-          where: { empresaId_codigo: { empresaId: empresa.id, codigo: v.Codigo } },
-          create: { empresaId: empresa.id, codigo: v.Codigo, nome: v.Nome },
-          update: { nome: v.Nome },
-        }),
-      ),
-      ...formasPagamentoErp.map((formaPagamento) =>
-        prisma.formaPagamento.upsert({
-          where: {
-            empresaId_codigo: { empresaId: empresa.id, codigo: formaPagamento.Codigo },
-          },
-          create: {
-            empresaId: empresa.id,
-            codigo: formaPagamento.Codigo,
-            nome: formaPagamento.Descricao,
-            maximoParcelas: formaPagamento.MaximoParcelas,
-          },
-          update: {
-            nome: formaPagamento.Descricao,
-            maximoParcelas: formaPagamento.MaximoParcelas,
-          },
-        }),
-      ),
-      ...produtosErp.map((produto) => {
-        const dados = {
+    // Upsert em lote (INSERT ... ON CONFLICT DO UPDATE multi-linha) em vez
+    // de um upsert por linha — com o Postgres remoto, cada upsert individual
+    // pagava uma ida-e-volta de rede; em lojas com milhares de produtos/itens
+    // de tabela de preço isso dominava o tempo da sincronização. Ver
+    // lib/upsertLote.js para o motivo de cada detalhe.
+    await prisma.$transaction(async (tx) => {
+      await upsertEmLote(
+        tx,
+        "Vendedor",
+        ["empresaId", "codigo", "nome"],
+        ["empresaId", "codigo"],
+        vendedoresErp.map((v) => ({ empresaId: empresa.id, codigo: v.Codigo, nome: v.Nome })),
+      );
+
+      await upsertEmLote(
+        tx,
+        "FormaPagamento",
+        ["empresaId", "codigo", "nome", "maximoParcelas"],
+        ["empresaId", "codigo"],
+        formasPagamentoErp.map((f) => ({
+          empresaId: empresa.id,
+          codigo: f.Codigo,
+          nome: f.Descricao,
+          maximoParcelas: f.MaximoParcelas,
+        })),
+      );
+
+      await upsertEmLote(
+        tx,
+        "Produto",
+        [
+          "empresaId",
+          "codigo",
+          "descricao",
+          "codigoBarras",
+          "codigoOriginal",
+          "codigoFabricante",
+          "unidade",
+          "grupoNome",
+          "informacoes",
+          "precoUnitario",
+          "precoNormal",
+          "precoPromocional",
+          "custoUnitario",
+          "porcDescontoMaximo",
+          "saldo",
+          "peso",
+          "tara",
+          "ativo",
+          "destaque",
+          "imagem1",
+          "imagem2",
+          "imagem3",
+        ],
+        ["empresaId", "codigo"],
+        produtosErp.map((produto) => ({
+          empresaId: empresa.id,
+          codigo: produto.Codigo,
           descricao: produto.Descricao,
           codigoBarras: produto.CodigoDeBarras ?? null,
           codigoOriginal: produto.CodigoOriginal ?? null,
@@ -186,15 +218,32 @@ router.post(
           imagem1: produto.UrlImagens?.[0] ?? null,
           imagem2: produto.UrlImagens?.[1] ?? null,
           imagem3: produto.UrlImagens?.[2] ?? null,
-        };
-        return prisma.produto.upsert({
-          where: { empresaId_codigo: { empresaId: empresa.id, codigo: produto.Codigo } },
-          create: { empresaId: empresa.id, codigo: produto.Codigo, ...dados },
-          update: dados,
-        });
-      }),
-      ...clientesErp.map((cliente) => {
-        const dados = {
+        })),
+      );
+
+      await upsertEmLote(
+        tx,
+        "Cliente",
+        [
+          "empresaId",
+          "codigo",
+          "nome",
+          "razaoSocial",
+          "cnpjCpf",
+          "endereco",
+          "enderecoNumero",
+          "enderecoComplemento",
+          "bairro",
+          "cidade",
+          "uf",
+          "telefone",
+          "ativo",
+          "tabelaDePrecoCodigo",
+        ],
+        ["empresaId", "codigo"],
+        clientesErp.map((cliente) => ({
+          empresaId: empresa.id,
+          codigo: cliente.Codigo,
           nome: cliente.Nome,
           razaoSocial: cliente.RazaoSocial ?? null,
           cnpjCpf: cliente.CNPJ_CPF ?? null,
@@ -207,77 +256,85 @@ router.post(
           telefone: cliente.Telefone ?? null,
           ativo: cliente.Ativo,
           tabelaDePrecoCodigo: cliente.TabelaDePrecoCodigo ?? null,
-        };
-        return prisma.cliente.upsert({
-          where: { empresaId_codigo: { empresaId: empresa.id, codigo: cliente.Codigo } },
-          create: { empresaId: empresa.id, codigo: cliente.Codigo, ...dados },
-          update: dados,
-        });
-      }),
-      // Cabeçalhos precisam ser gravados antes dos itens: os itens se
-      // conectam ao cabeçalho pela chave natural do ERP (grupoDeEmpresaId +
-      // empresaCodigo + codigo), que só existe depois deste upsert.
-      ...tabelasDePrecoErp.map((tabela) => {
-        const dados = {
+        })),
+      );
+
+      // Cabeçalhos precisam ser gravados (e lidos de volta) antes dos itens:
+      // o item se conecta ao cabeçalho por tabelaDePrecosId (FK real), que só
+      // existe depois deste upsert — diferente das outras entidades, aqui
+      // não dá pra só mandar a chave natural pro item.
+      await upsertEmLote(
+        tx,
+        "TabelaDePrecos",
+        [
+          "empresaId",
+          "grupoDeEmpresaId",
+          "empresaCodigo",
+          "codigo",
+          "tipoDeParticipanteCodigo",
+          "descricao",
+          "descricaoTipoDeParticipante",
+          "dataValidade",
+          "dataValidadeConsulta",
+        ],
+        ["grupoDeEmpresaId", "empresaCodigo", "codigo"],
+        tabelasDePrecoErp.map((tabela) => ({
+          empresaId: empresa.id,
+          grupoDeEmpresaId: tabela.GrupoDeEmpresaId,
+          empresaCodigo: tabela.EmpresaCodigo,
+          codigo: tabela.Codigo,
           tipoDeParticipanteCodigo: tabela.TipoDeParticipanteCodigo,
           descricao: tabela.Descricao,
           descricaoTipoDeParticipante: tabela.DescricaoTipoDeParticipante ?? null,
           dataValidade: tabela.DataValidade ? new Date(tabela.DataValidade) : null,
           dataValidadeConsulta: tabela.DataValidadeConsulta ? new Date(tabela.DataValidadeConsulta) : null,
-        };
-        return prisma.tabelaDePrecos.upsert({
-          where: {
-            grupoDeEmpresaId_empresaCodigo_codigo: {
-              grupoDeEmpresaId: tabela.GrupoDeEmpresaId,
-              empresaCodigo: tabela.EmpresaCodigo,
-              codigo: tabela.Codigo,
-            },
-          },
-          create: {
-            empresaId: empresa.id,
-            grupoDeEmpresaId: tabela.GrupoDeEmpresaId,
-            empresaCodigo: tabela.EmpresaCodigo,
-            codigo: tabela.Codigo,
-            ...dados,
-          },
-          update: dados,
-        });
-      }),
-      ...tabelasDePrecoErp.flatMap((tabela) =>
-        (tabela.TabelaDePrecosItens ?? []).map((item) => {
-          const dados = {
+        })),
+      );
+
+      const cabecalhos = await tx.tabelaDePrecos.findMany({
+        where: { empresaId: empresa.id },
+        select: { id: true, grupoDeEmpresaId: true, empresaCodigo: true, codigo: true },
+      });
+      const idDoCabecalho = new Map(
+        cabecalhos.map((c) => [`${c.grupoDeEmpresaId}:${c.empresaCodigo}:${c.codigo}`, c.id]),
+      );
+
+      const itens = tabelasDePrecoErp.flatMap((tabela) => tabela.TabelaDePrecosItens ?? []);
+      await upsertEmLote(
+        tx,
+        "TabelaDePrecosItem",
+        [
+          "tabelaDePrecosId",
+          "grupoDeEmpresaId",
+          "empresaCodigo",
+          "tabelaDePrecosCodigo",
+          "idErp",
+          "produtoCodigo",
+          "valor",
+        ],
+        ["grupoDeEmpresaId", "empresaCodigo", "idErp"],
+        itens.map((item) => {
+          const tabelaDePrecosId = idDoCabecalho.get(
+            `${item.GrupoDeEmpresaId}:${item.EmpresaCodigo}:${item.TabelaDePrecosCodigo}`,
+          );
+          if (!tabelaDePrecosId) {
+            throw new HttpError(
+              502,
+              `O ERP retornou um item de tabela de preço (id ${item.Id}) sem o cabeçalho correspondente.`,
+            );
+          }
+          return {
+            tabelaDePrecosId,
+            grupoDeEmpresaId: item.GrupoDeEmpresaId,
+            empresaCodigo: item.EmpresaCodigo,
             tabelaDePrecosCodigo: item.TabelaDePrecosCodigo,
+            idErp: item.Id,
             produtoCodigo: item.ProdutoCodigo,
             valor: item.Valor,
           };
-          return prisma.tabelaDePrecosItem.upsert({
-            where: {
-              grupoDeEmpresaId_empresaCodigo_idErp: {
-                grupoDeEmpresaId: item.GrupoDeEmpresaId,
-                empresaCodigo: item.EmpresaCodigo,
-                idErp: item.Id,
-              },
-            },
-            create: {
-              grupoDeEmpresaId: item.GrupoDeEmpresaId,
-              empresaCodigo: item.EmpresaCodigo,
-              idErp: item.Id,
-              ...dados,
-              tabelaDePrecos: {
-                connect: {
-                  grupoDeEmpresaId_empresaCodigo_codigo: {
-                    grupoDeEmpresaId: item.GrupoDeEmpresaId,
-                    empresaCodigo: item.EmpresaCodigo,
-                    codigo: item.TabelaDePrecosCodigo,
-                  },
-                },
-              },
-            },
-            update: dados,
-          });
         }),
-      ),
-    ]);
+      );
+    }, { timeout: 120000, maxWait: 10000 });
 
     // Recalcula o parcelamento máximo a partir das formas de pagamento
     // ativas no site (já upsertadas acima) — evita consultar FormaPagamento
