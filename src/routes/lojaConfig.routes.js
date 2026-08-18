@@ -4,6 +4,7 @@ const prisma = require("../lib/prisma");
 const { HttpError } = require("../lib/httpError");
 const { asyncHandler } = require("../lib/asyncHandler");
 const { authenticate, requireRole } = require("../middleware/auth");
+const { subirLogo, subirLogoThumb, removerLogo, removerLogoThumb } = require("../lib/s3");
 
 const router = Router();
 
@@ -59,6 +60,12 @@ const lojaConfigSchema = z.object({
   logoThumb: z.string().regex(LOGO_THUMB_DATA_URL_REGEX).nullable().optional(),
 });
 
+// Key do S3 é fixa por empresa (mesma URL após cada re-upload) — sem isso o
+// navegador continuaria mostrando a logo antiga em cache após trocar.
+function comCacheBuster(url, empresa) {
+  return url ? `${url}?v=${empresa.updatedAt.getTime()}` : null;
+}
+
 function toPublicConfig(empresa) {
   return {
     vendedorPadraoCodigo: empresa.vendedorPadraoCodigo,
@@ -78,7 +85,8 @@ function toPublicConfig(empresa) {
     descontoPercentual: empresa.descontoPercentual?.toString() ?? null,
     quantidadeMinima: empresa.quantidadeMinima?.toString() ?? null,
     corPrimaria: empresa.corPrimaria,
-    temLogo: empresa.logo != null,
+    logoUrl: comCacheBuster(empresa.logoUrl, empresa),
+    logoThumbUrl: comCacheBuster(empresa.logoThumbUrl, empresa),
   };
 }
 
@@ -95,25 +103,27 @@ router.put(
   "/",
   asyncHandler(async (req, res) => {
     const { logo, logoThumb, ...data } = lojaConfigSchema.parse(req.body);
+    const empresaId = req.auth.empresaId;
 
     if (logo === null) {
-      data.logo = null;
-      data.logoMimeType = null;
+      data.logoUrl = null;
+      await removerLogo(empresaId);
     } else if (logo !== undefined) {
       const [, mimeType, base64] = LOGO_DATA_URL_REGEX.exec(logo);
       const buffer = Buffer.from(base64, "base64");
       if (buffer.length > LOGO_TAMANHO_MAXIMO) {
         throw new HttpError(400, "A logo deve ter no máximo 2MB.");
       }
-      data.logo = buffer;
-      data.logoMimeType = mimeType;
+      data.logoUrl = await subirLogo(empresaId, buffer, mimeType);
     }
 
     if (logoThumb === null) {
-      data.logoThumb = null;
+      data.logoThumbUrl = null;
+      await removerLogoThumb(empresaId);
     } else if (logoThumb !== undefined) {
       const [, base64] = LOGO_THUMB_DATA_URL_REGEX.exec(logoThumb);
-      data.logoThumb = Buffer.from(base64, "base64");
+      const buffer = Buffer.from(base64, "base64");
+      data.logoThumbUrl = await subirLogoThumb(empresaId, buffer);
     }
 
     if (data.vendedorPadraoCodigo != null) {

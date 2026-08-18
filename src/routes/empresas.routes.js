@@ -24,7 +24,7 @@ router.get(
       slug: empresa.slug,
       nome: nomeFantasia ?? empresa.nome,
       corPrimaria: empresa.corPrimaria,
-      temLogo: empresa.logoThumb != null,
+      logoThumbUrl: comCacheBuster(empresa.logoThumbUrl, empresa),
       cidade,
       estado,
       endereco,
@@ -44,6 +44,12 @@ router.get(
     });
   }),
 );
+
+// Key do S3 é fixa por empresa (mesma URL após cada re-upload) — sem isso o
+// navegador continuaria mostrando a logo antiga em cache após trocar.
+function comCacheBuster(url, empresa) {
+  return url ? `${url}?v=${empresa.updatedAt.getTime()}` : null;
+}
 
 // Extrai só os campos seguros do JSON bruto do ERP — nunca repassar erpDados
 // inteiro em rota pública (ele carrega o TokenAcesso do beijaflor).
@@ -81,9 +87,8 @@ function extrairDadosPublicosDoErp(erpDados) {
 // página inicial (busca/filtro por estado e cidade). Uma loja só aparece
 // aqui depois de passar pelos mesmos 3 passos exigidos no painel admin —
 // não faz sentido listar uma loja que ainda não terminou a configuração
-// básica. Nunca expõe erpDados bruto nem a logo em bytes — só a miniatura
-// via URL (o cliente monta /by-slug/:slug/logo/thumb) e o necessário para
-// calcular o status aberta/fechada/pausada no front.
+// básica. Nunca expõe erpDados bruto — só a URL da miniatura (hospedada no
+// S3) e o necessário para calcular o status aberta/fechada/pausada no front.
 router.get(
   "/ativas",
   asyncHandler(async (_req, res) => {
@@ -93,7 +98,8 @@ router.get(
         slug: true,
         nome: true,
         erpDados: true,
-        logoThumb: true,
+        logoThumbUrl: true,
+        updatedAt: true,
         lojaFechada: true,
         horarios: true,
         ultimaSincronizacao: true,
@@ -119,7 +125,7 @@ router.get(
         return {
           slug: empresa.slug,
           nome: nomeFantasia ?? empresa.nome,
-          temLogo: empresa.logoThumb != null,
+          logoThumbUrl: comCacheBuster(empresa.logoThumbUrl, empresa),
           cidade,
           estado,
           lojaFechada: empresa.lojaFechada,
@@ -127,32 +133,6 @@ router.get(
         };
       }),
     );
-  }),
-);
-
-// Pública — serve a logo da loja (usada em <img>, sem cabeçalho de autenticação).
-router.get(
-  "/by-slug/:slug/logo",
-  asyncHandler(async (req, res) => {
-    const empresa = await prisma.empresa.findUnique({ where: { slug: req.params.slug } });
-    if (!empresa?.logo) throw new HttpError(404, "Logo não encontrada.");
-    res.set("Content-Type", empresa.logoMimeType ?? "image/png");
-    res.set("Cache-Control", "public, max-age=300");
-    // Prisma devolve Bytes como Uint8Array puro — precisa virar Buffer de
-    // verdade, senão o Express serializa como JSON em vez de binário.
-    res.send(Buffer.from(empresa.logo));
-  }),
-);
-
-// Pública — miniatura quadrada da logo (usada em espaços compactos, como o sidebar do admin).
-router.get(
-  "/by-slug/:slug/logo/thumb",
-  asyncHandler(async (req, res) => {
-    const empresa = await prisma.empresa.findUnique({ where: { slug: req.params.slug } });
-    if (!empresa?.logoThumb) throw new HttpError(404, "Miniatura da logo não encontrada.");
-    res.set("Content-Type", "image/png");
-    res.set("Cache-Control", "public, max-age=300");
-    res.send(Buffer.from(empresa.logoThumb));
   }),
 );
 

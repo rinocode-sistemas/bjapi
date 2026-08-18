@@ -47,9 +47,9 @@ model Empresa {
   lojaFechada               Boolean  @default(false)
   pedidoMinimo              Decimal? @db.Decimal(10, 2)
   corPrimaria               String?
-  logo                      Bytes?
-  logoMimeType              String?
-  logoThumb                 Bytes?
+  // Hospedadas no S3 (bucket rinocode-bjstore-logos) — ver src/lib/s3.js.
+  logoUrl                   String?
+  logoThumbUrl              String?
   permiteEntrega            Boolean  @default(true)
   permiteRetirada           Boolean  @default(true)
 
