@@ -103,6 +103,7 @@ router.get(
         ultimaSincronizacao: true,
         vendedorPadraoCodigo: true,
         contatoEmail: true,
+        contatoTelefone: true,
         bairrosFreteGratis: true,
         _count: { select: { vendedores: true, bairros: true } },
       },
