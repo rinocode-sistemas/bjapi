@@ -61,8 +61,14 @@ router.get(
 router.patch(
   "/",
   asyncHandler(async (req, res) => {
+    // Sem trim no nome: precisa bater exatamente com o `grupoNome` gravado no
+    // Produto (a listagem em GET / usa o valor bruto do ERP, sem normalizar
+    // espaços) — se o ERP manda o nome com espaço sobrando e a gente
+    // trimasse aqui, o upsert criava/alterava uma linha de GrupoProduto com
+    // nome diferente da que a listagem usa, e o toggle não tinha efeito
+    // nenhum nos produtos de verdade (nem refletia na UI).
     const { nome, disponivel } = z
-      .object({ nome: z.string().trim().min(1), disponivel: z.boolean() })
+      .object({ nome: z.string().min(1), disponivel: z.boolean() })
       .parse(req.body);
 
     const empresaId = req.auth.empresaId;
