@@ -7,6 +7,7 @@ const { asyncHandler } = require("../lib/asyncHandler");
 const { authenticate, requireRole } = require("../middleware/auth");
 const { SENHA_MSG, isSenhaForte } = require("../lib/passwordRules");
 const { calcularOnboarding } = require("../lib/onboarding");
+const { extrairNomeFantasiaDoErp, extrairEnderecoDoErp } = require("../lib/erpEmpresaDados");
 
 const router = Router();
 
@@ -15,7 +16,10 @@ const router = Router();
 router.get(
   "/by-slug/:slug",
   asyncHandler(async (req, res) => {
-    const empresa = await prisma.empresa.findUnique({ where: { slug: req.params.slug } });
+    const empresa = await prisma.empresa.findUnique({
+      where: { slug: req.params.slug },
+      include: { _count: { select: { vendedores: true, bairros: true } } },
+    });
     if (!empresa) throw new HttpError(404, "Loja não encontrada.");
     if (!empresa.ativo) throw new HttpError(403, "Loja inativa. Entre em contato com o suporte.");
     const { nomeFantasia, cidade, estado, endereco } = extrairDadosPublicosDoErp(empresa.erpDados);
@@ -23,8 +27,19 @@ router.get(
       id: empresa.id,
       slug: empresa.slug,
       nome: nomeFantasia ?? empresa.nome,
+      // Acessar a loja direto pela URL não passa pelo filtro do diretório
+      // (/ativas) — sem isso, uma loja que ainda não terminou os 3 passos do
+      // onboarding tentaria renderizar a vitrine sem vendedor/bairro/etc.
+      // configurados. O front usa isso pra mostrar "Loja em construção".
+      onboardingCompleto: calcularOnboarding(empresa, {
+        totalVendedores: empresa._count.vendedores,
+        totalBairros: empresa._count.bairros,
+      }).completo,
       corPrimaria: empresa.corPrimaria,
       logoThumbUrl: comCacheBuster(empresa.logoThumbUrl, empresa),
+      // Logo em resolução original — usada só na imagem de compartilhamento
+      // (og:image), pra não ficar borrada como a miniatura de 128x128 fica.
+      logoUrl: comCacheBuster(empresa.logoUrl, empresa),
       cidade,
       estado,
       endereco,
@@ -54,25 +69,8 @@ function comCacheBuster(url, empresa) {
 // Extrai só os campos seguros do JSON bruto do ERP — nunca repassar erpDados
 // inteiro em rota pública (ele carrega o TokenAcesso do beijaflor).
 function extrairDadosPublicosDoErp(erpDados) {
-  if (!erpDados || typeof erpDados !== "object") {
-    return { nomeFantasia: null, cidade: null, estado: null, endereco: null };
-  }
-
-  let nomeFantasia = null;
-  if (typeof erpDados.Descricao === "string" && erpDados.Descricao.trim()) {
-    nomeFantasia = erpDados.Descricao.trim();
-  } else if (erpDados.GrupodeEmpresa && typeof erpDados.GrupodeEmpresa === "object") {
-    const descricaoGrupo = erpDados.GrupodeEmpresa.Descricao;
-    if (typeof descricaoGrupo === "string" && descricaoGrupo.trim()) nomeFantasia = descricaoGrupo.trim();
-  }
-
-  const cidade = typeof erpDados.EmpresaCidade === "string" ? erpDados.EmpresaCidade : null;
-  const estado = typeof erpDados.EmpresaUF === "string" ? erpDados.EmpresaUF : null;
-
-  const rua = typeof erpDados.EmpresaEndereco === "string" ? erpDados.EmpresaEndereco.trim() : "";
-  const numero =
-    typeof erpDados.EmpresaEnderecoNumero === "string" ? erpDados.EmpresaEnderecoNumero.trim() : "";
-  const bairro = typeof erpDados.EmpresaBairro === "string" ? erpDados.EmpresaBairro.trim() : "";
+  const nomeFantasia = extrairNomeFantasiaDoErp(erpDados);
+  const { rua, numero, bairro, cidade, estado } = extrairEnderecoDoErp(erpDados);
   const enderecoPartes = [
     [rua, numero].filter(Boolean).join(", "),
     bairro,
@@ -141,12 +139,21 @@ router.use(authenticate, requireRole("SUPER"));
 const empresaBaseFields = {
   codigoId: z.string().trim().min(1),
   nome: z.string().trim().min(1),
-  empresaCodigo: z.string().trim().min(1),
+  // Não é mais preenchido no cadastro — vem do próprio ERP na 1ª sincronização
+  // (ver /integracao/sincronizar) e é gravado automaticamente na empresa.
+  empresaCodigo: z.string().trim().optional(),
   slug: z.string().trim().min(1),
   parceiroNegocio: z.string().trim().min(1, "Informe o parceiro de negócio."),
   usuarioAdm: z.string().trim().min(1),
   emailRecuperacao: z.string().trim().email(),
   ativo: z.boolean().optional().default(true),
+  cpfCnpj: z.string().trim().optional(),
+  cep: z.string().trim().min(1, "Informe o CEP."),
+  endereco: z.string().trim().min(1, "Informe o endereço."),
+  enderecoNumero: z.string().trim().min(1, "Informe o número."),
+  bairro: z.string().trim().min(1, "Informe o bairro."),
+  cidade: z.string().trim().min(1, "Informe a cidade."),
+  estado: z.string().trim().min(1, "Informe o estado."),
 };
 
 const empresaCreateSchema = z.object({
@@ -180,6 +187,13 @@ function toPublicEmpresa(empresa) {
     senha: "",
     emailRecuperacao: adm?.email ?? "",
     ativo: empresa.ativo,
+    cpfCnpj: empresa.cpfCnpj ?? "",
+    cep: empresa.cep ?? "",
+    endereco: empresa.endereco ?? "",
+    enderecoNumero: empresa.enderecoNumero ?? "",
+    bairro: empresa.bairro ?? "",
+    cidade: empresa.cidade ?? "",
+    estado: empresa.estado ?? "",
   };
 }
 
@@ -220,6 +234,13 @@ router.post(
           slug: data.slug,
           parceiroNegocio: data.parceiroNegocio,
           ativo: data.ativo,
+          cpfCnpj: data.cpfCnpj || null,
+          cep: data.cep || null,
+          endereco: data.endereco || null,
+          enderecoNumero: data.enderecoNumero || null,
+          bairro: data.bairro || null,
+          cidade: data.cidade || null,
+          estado: data.estado || null,
         },
       });
 
@@ -267,6 +288,13 @@ router.put(
           ...(data.slug !== undefined && { slug: data.slug }),
           ...(data.parceiroNegocio !== undefined && { parceiroNegocio: data.parceiroNegocio }),
           ...(data.ativo !== undefined && { ativo: data.ativo }),
+          ...(data.cpfCnpj !== undefined && { cpfCnpj: data.cpfCnpj || null }),
+          ...(data.cep !== undefined && { cep: data.cep || null }),
+          ...(data.endereco !== undefined && { endereco: data.endereco || null }),
+          ...(data.enderecoNumero !== undefined && { enderecoNumero: data.enderecoNumero || null }),
+          ...(data.bairro !== undefined && { bairro: data.bairro || null }),
+          ...(data.cidade !== undefined && { cidade: data.cidade || null }),
+          ...(data.estado !== undefined && { estado: data.estado || null }),
         },
       });
 

@@ -16,6 +16,7 @@ const { HttpError } = require("../lib/httpError");
 const { asyncHandler } = require("../lib/asyncHandler");
 const { authenticate, requireRole } = require("../middleware/auth");
 const { upsertEmLote } = require("../lib/upsertLote");
+const { extrairEnderecoDoErp } = require("../lib/erpEmpresaDados");
 
 const router = Router();
 
@@ -92,9 +93,15 @@ router.post(
       throw err;
     }
 
+    // "EmpresaCodigo" não é mais preenchido no cadastro (superadmin) — vem
+    // do próprio ERP nessa 1ª sincronização e passa a ser gravado na
+    // empresa. Só valida contra ele quando já existe um valor gravado (ou
+    // seja, a partir da 2ª sincronização em diante), pra pegar credenciais
+    // trocadas por engano sem travar o fluxo normal de primeiro login.
+    const empresaCodigoJaGravado = Boolean(empresa.empresaCodigo);
     if (
       String(usuarioErp.Id) !== String(empresa.codigoId) ||
-      String(usuarioErp.EmpresaCodigo) !== String(empresa.empresaCodigo)
+      (empresaCodigoJaGravado && String(usuarioErp.EmpresaCodigo) !== String(empresa.empresaCodigo))
     ) {
       throw new HttpError(
         400,
@@ -102,11 +109,22 @@ router.post(
       );
     }
 
+    // Atualiza cidade/estado/endereço/bairro a partir do cadastro da empresa
+    // no ERP a cada sincronização — cep e cpfCnpj NÃO entram aqui de
+    // propósito: são curados manualmente (superadmin) e servem de fonte pro
+    // envio de pedido ao ERP, independente do que o ERP tem cadastrado.
+    const enderecoErp = extrairEnderecoDoErp(usuarioErp);
     await prisma.empresa.update({
       where: { id: empresa.id },
       data: {
         erpTokenAcesso: usuarioErp.TokenAcesso,
         erpDados: usuarioErp,
+        empresaCodigo: String(usuarioErp.EmpresaCodigo),
+        endereco: enderecoErp.rua,
+        enderecoNumero: enderecoErp.numero,
+        bairro: enderecoErp.bairro,
+        cidade: enderecoErp.cidade,
+        estado: enderecoErp.estado,
       },
     });
 

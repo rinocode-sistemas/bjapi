@@ -3,8 +3,13 @@
 // (só lojas com onboarding completo aparecem lá).
 function calcularOnboarding(empresa, { totalVendedores, totalBairros }) {
   const passo1 = Boolean(empresa.ultimaSincronizacao) && totalVendedores > 0;
+  const diasUteis = empresa.horarios?.diasUteis;
   const passo2 = Boolean(
-    empresa.vendedorPadraoCodigo != null && empresa.horarios && empresa.contatoEmail,
+    empresa.vendedorPadraoCodigo != null &&
+      diasUteis?.de &&
+      diasUteis?.ate &&
+      empresa.contatoEmail &&
+      empresa.contatoTelefone,
   );
   const passo3 = empresa.bairrosFreteGratis || totalBairros > 0;
 

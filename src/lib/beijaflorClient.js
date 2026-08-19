@@ -167,6 +167,33 @@ async function retornaTabelasDePrecoComItens({
   return data;
 }
 
+// Confirma o pedido no ERP (venda "offline", registrada pelo app mobile).
+// `PedidoExterno` precisa ser único por empresa no beijaflor — em duplicata
+// ele responde 400 com "Pedido já consta no beija-flor com número: X"; sinalizamos
+// isso via `err.duplicado` pro chamador decidir se tenta de novo com outro id.
+async function gerarVendaMobilidadeOffline({ token, venda }) {
+  const { status, data } = await requestJson(
+    `${BASE_URL}/api/mobilidade/GerarVendaMobilidadeOffLine`,
+    {
+      method: "POST",
+      headers: { token },
+      body: venda,
+    },
+  );
+  if (status < 200 || status >= 300) {
+    const mensagem =
+      (data && typeof data === "object" && typeof data.Message === "string" && data.Message) ||
+      "Não foi possível enviar o pedido ao beijaflor ERP.";
+    const err = new BeijaflorApiError(mensagem);
+    err.duplicado = /já consta/i.test(mensagem);
+    throw err;
+  }
+  if (data == null) {
+    throw new BeijaflorApiError("Resposta inesperada do beijaflor ERP ao enviar o pedido.");
+  }
+  return data;
+}
+
 module.exports = {
   retornaUsuario,
   retornaVendedores,
@@ -174,5 +201,6 @@ module.exports = {
   retornaTodosProdutos,
   retornaTodosClientes,
   retornaTabelasDePrecoComItens,
+  gerarVendaMobilidadeOffline,
   BeijaflorApiError,
 };

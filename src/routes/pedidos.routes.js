@@ -5,6 +5,7 @@ const { HttpError } = require("../lib/httpError");
 const { asyncHandler } = require("../lib/asyncHandler");
 const { carregarTabelaAtivaDaEmpresa, resolverPrecoProduto } = require("../lib/precoResolver");
 const { authenticate, requireRole } = require("../middleware/auth");
+const { enviarPedidoParaErp } = require("../lib/enviarPedidoErp");
 
 const router = Router();
 
@@ -38,6 +39,7 @@ const pedidoSchema = z.object({
     nome: z.string().trim().min(1, "Informe o nome."),
     razaoSocial: z.string().trim().nullable().optional(),
     inscricaoEstadual: z.string().trim().nullable().optional(),
+    telefone: z.string().trim().min(8, "Informe um telefone válido."),
   }),
   endereco: z
     .object({
@@ -227,6 +229,7 @@ router.post(
           clienteNome: data.cliente.nome,
           clienteRazaoSocial: data.cliente.razaoSocial || null,
           clienteInscricaoEstadual: data.cliente.inscricaoEstadual || null,
+          clienteTelefone: apenasDigitos(data.cliente.telefone),
           tipoOperacao: data.tipoOperacao === "entrega" ? "ENTREGA" : "RETIRADA",
           enderecoCep: data.endereco?.cep ?? null,
           enderecoRua: data.endereco?.rua ?? null,
@@ -265,6 +268,14 @@ router.post(
 
       return criado;
     });
+
+    // Auto-aceitar já deixou o pedido ACEITO — confirma no ERP agora, antes
+    // de responder ao cliente. Nunca lança (ver enviarPedidoErp.js): se o
+    // beijaflor falhar, o pedido continua aceito do nosso lado mesmo assim,
+    // só fica marcado com erro pro admin ver/reenviar depois.
+    if (pedido.status === "ACEITO") {
+      await enviarPedidoParaErp(prisma, empresa.id, pedido.id);
+    }
 
     res.status(201).json(toPublicPedido(pedido));
   }),
@@ -345,12 +356,15 @@ function toAdminPedido(pedido) {
     numero: pedido.numero,
     status: pedido.status,
     statusEnvioErp: pedido.statusEnvioErp,
+    erpPedidoId: pedido.erpPedidoId,
+    erpErro: pedido.erpErro,
     tipoOperacao: pedido.tipoOperacao,
     cliente: {
       nome: pedido.clienteNome,
       cpfCnpj: pedido.clienteCpfCnpj,
       razaoSocial: pedido.clienteRazaoSocial,
       inscricaoEstadual: pedido.clienteInscricaoEstadual,
+      telefone: pedido.clienteTelefone,
     },
     endereco:
       pedido.tipoOperacao === "ENTREGA"
@@ -609,7 +623,7 @@ router.get(
     }
     const vendasPorDiaNoMes = Array.from(diasDoMes.entries()).map(([dia, valor]) => ({
       dia,
-      valor: valor.toFixed(2),
+      valor: Number(valor.toFixed(2)),
     }));
 
     // Vendas por grupo de produtos — últimos 30 dias.
@@ -667,10 +681,10 @@ const STATUS_TRANSICOES_MANUAIS = {
   CANCELADO: ["EM_PROCESSAMENTO", "ACEITO"],
 };
 
-// Admin — aceitar/recusar um pedido em "Em processamento". "ACEITO" aqui só
-// atualiza o status no nosso banco; postar de fato pro ERP (o que vai gerar
-// statusEnvioErp=ENVIADO/erpPedidoId) é uma fase futura, ainda não
-// implementada — por ora esse botão só confirma o pedido no nosso lado.
+// Admin — aceitar/recusar um pedido em "Em processamento". Aceitar também
+// confirma o pedido no ERP (ver enviarPedidoErp.js) — nunca lança, então um
+// erro no envio não impede o aceite; só fica registrado em
+// statusEnvioErp/erpErro pro admin ver.
 router.patch(
   "/:id/status",
   asyncHandler(async (req, res) => {
@@ -685,11 +699,19 @@ router.patch(
       throw new HttpError(400, `Não é possível mudar de "${pedido.status}" para "${status}".`);
     }
 
-    const atualizado = await prisma.pedido.update({
+    let atualizado = await prisma.pedido.update({
       where: { id: pedido.id },
       data: { status },
       include: { itens: true, pagamentos: true },
     });
+
+    if (status === "ACEITO") {
+      await enviarPedidoParaErp(prisma, req.auth.empresaId, pedido.id);
+      atualizado = await prisma.pedido.findUnique({
+        where: { id: pedido.id },
+        include: { itens: true, pagamentos: true },
+      });
+    }
 
     res.json(toAdminPedido(atualizado));
   }),

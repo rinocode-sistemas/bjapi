@@ -52,6 +52,20 @@ model Empresa {
   logoThumbUrl              String?
   permiteEntrega            Boolean  @default(true)
   permiteRetirada           Boolean  @default(true)
+  // Dados fiscais/endereço da própria empresa — preenchidos no cadastro
+  // (superadmin), com busca automática por CNPJ/CEP como no checkout do
+  // cliente. cidade/estado/endereco/enderecoNumero/bairro são atualizados a
+  // cada sincronização com o ERP (mesmos campos do cadastro da empresa lá);
+  // cpfCnpj e cep NÃO são tocados pela sincronização — são a fonte curada
+  // usada no envio de pedido ao ERP (ClienteCEP) quando é retirada com CPF
+  // e o endereço do cliente não foi coletado.
+  cpfCnpj                   String?
+  cep                       String?
+  endereco                  String?
+  enderecoNumero            String?
+  bairro                    String?
+  cidade                    String?
+  estado                    String?
 
   // Maior "MaximoParcelas" entre as formas de pagamento ativas no site —
   // recalculado a cada sincronização e a cada toggle de usaNoSite, para
@@ -343,6 +357,9 @@ model Pedido {
   clienteNome              String
   clienteRazaoSocial       String?
   clienteInscricaoEstadual String?
+  // Nullable só por causa de pedidos antigos (criados antes desse campo
+  // existir) — checkout passa a exigir no formulário a partir de agora.
+  clienteTelefone          String?
 
   tipoOperacao TipoOperacaoPedido
 
