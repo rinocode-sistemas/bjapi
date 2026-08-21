@@ -58,6 +58,15 @@ function montarObservacao(pedido) {
   return partes.join("\n");
 }
 
+// A API do beijaflor não tem um jeito de mandar os opcionais escolhidos
+// (ProdutoModoDeServir) separados — só um campo de observação livre por
+// item. Junta as descrições com quebra de linha, no formato que o ERP já
+// usa (ex.: "ADICIONAL DE BACON,\nADICIONAL DE OVO,\nSEM CEBOLA").
+function montarObservacaoDoItem(item) {
+  const opcionais = Array.isArray(item.opcionais) ? item.opcionais : [];
+  return opcionais.map((o) => o.descricao).join(",\n");
+}
+
 // Endereço só falta quando é retirada + CPF (a única combinação em que o
 // checkout dispensa os campos de endereço — CNPJ sempre exige endereço
 // completo mesmo na retirada, ver checkout.tsx). Nesse caso, cidade/UF/CEP
@@ -97,6 +106,7 @@ function montarPayload({ empresa, pedido }) {
       Quantidade: item.quantidade,
       ValorUnitario: Number(item.precoUnitario),
       ValorDesconto: 0,
+      Observacao: montarObservacaoDoItem(item),
     })),
     FormasDePagamento: pedido.pagamentos.map((p) => ({
       Codigo: p.formaPagamentoCodigo,

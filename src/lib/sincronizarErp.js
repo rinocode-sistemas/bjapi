@@ -148,6 +148,7 @@ async function sincronizarEmpresaComErp(prisma, empresa, { resetar = false } = {
         "saldo",
         "peso",
         "tara",
+        "validadeDias",
         "ativo",
         "destaque",
         "imagem1",
@@ -173,12 +174,44 @@ async function sincronizarEmpresaComErp(prisma, empresa, { resetar = false } = {
         saldo: produto.Saldo,
         peso: produto.Peso,
         tara: produto.Tara,
+        validadeDias: produto.ValidadeDias ?? null,
         ativo: produto.Ativo,
         destaque: produto.Destaque ?? false,
         imagem1: produto.UrlImagens?.[0] ?? null,
         imagem2: produto.UrlImagens?.[1] ?? null,
         imagem3: produto.UrlImagens?.[2] ?? null,
       })),
+    );
+
+    // "ProdutoModoDeServir" — opções/adicionais do produto (ver comentário no
+    // schema). Mesma chave natural do restante da sincronização
+    // (grupoDeEmpresaId + empresaCodigo + idErp), não depende do Produto já
+    // ter sido upsertado antes (produtoCodigo é só referência por código).
+    const modosDeServir = produtosErp.flatMap((produto) =>
+      (produto.ProdutoModoDeServir ?? []).map((modo) => ({
+        empresaId: empresa.id,
+        idErp: modo.Id,
+        grupoDeEmpresaId: modo.GrupoDeEmpresaId,
+        empresaCodigo: modo.EmpresaCodigo,
+        produtoCodigo: modo.ProdutoCodigo,
+        descricao: modo.Descricao,
+        valorAdicional: modo.ValorAdicional,
+      })),
+    );
+    await upsertEmLote(
+      tx,
+      "ProdutoModoDeServir",
+      [
+        "empresaId",
+        "idErp",
+        "grupoDeEmpresaId",
+        "empresaCodigo",
+        "produtoCodigo",
+        "descricao",
+        "valorAdicional",
+      ],
+      ["grupoDeEmpresaId", "empresaCodigo", "idErp"],
+      modosDeServir,
     );
 
     await upsertEmLote(

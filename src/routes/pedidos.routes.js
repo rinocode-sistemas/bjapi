@@ -64,6 +64,9 @@ const pedidoSchema = z.object({
       z.object({
         codigo: z.number().int(),
         quantidade: z.number().positive(),
+        // Ids (idErp) dos ProdutoModoDeServir escolhidos — revalidados contra
+        // o banco abaixo, nunca confiamos na descrição/valor vindos do client.
+        opcionais: z.array(z.number().int()).optional().default([]),
       }),
     )
     .min(1, "O carrinho está vazio."),
@@ -121,20 +124,53 @@ router.post(
     });
     const produtosPorCodigo = new Map(produtos.map((p) => [p.codigo, p]));
 
+    // Opcionais (ProdutoModoDeServir) pedidos em qualquer item — revalidados
+    // de uma vez só contra o banco; descrição/valor vêm sempre daqui, nunca
+    // do que o client mandou.
+    const idsOpcionaisPedidos = [...new Set(data.itens.flatMap((i) => i.opcionais))];
+    const opcionaisValidos =
+      idsOpcionaisPedidos.length > 0
+        ? await prisma.produtoModoDeServir.findMany({
+            where: {
+              empresaId: empresa.id,
+              produtoCodigo: { in: codigos },
+              idErp: { in: idsOpcionaisPedidos },
+            },
+          })
+        : [];
+    const opcionaisPorProduto = new Map();
+    for (const opcional of opcionaisValidos) {
+      const lista = opcionaisPorProduto.get(opcional.produtoCodigo) ?? [];
+      lista.push(opcional);
+      opcionaisPorProduto.set(opcional.produtoCodigo, lista);
+    }
+
     const itensResolvidos = data.itens.map((item) => {
       const produto = produtosPorCodigo.get(item.codigo);
       if (!produto) {
         throw new HttpError(400, `Um dos produtos do carrinho não está mais disponível (código ${item.codigo}).`);
       }
       const { precoFinal } = resolverPrecoProduto(produto, tabelaAtiva);
-      const precoTotal = Number(precoFinal) * item.quantidade;
+      // Opcionais escolhidos pra este produto — ids que não batem com nenhum
+      // ProdutoModoDeServir real (removido nesse meio-tempo, etc.) são
+      // simplesmente ignorados, sem travar o pedido.
+      const opcionaisDoItem = (opcionaisPorProduto.get(produto.codigo) ?? []).filter((o) =>
+        item.opcionais.includes(o.idErp),
+      );
+      const valorOpcionais = opcionaisDoItem.reduce((soma, o) => soma + Number(o.valorAdicional), 0);
+      const precoUnitario = Number(precoFinal) + valorOpcionais;
+      const precoTotal = precoUnitario * item.quantidade;
       return {
         produtoCodigo: produto.codigo,
         descricao: produto.descricao,
         grupoNome: produto.grupoNome,
-        precoUnitario: precoFinal,
+        precoUnitario,
         quantidade: item.quantidade,
         precoTotal,
+        opcionais: opcionaisDoItem.map((o) => ({
+          descricao: o.descricao,
+          valorAdicional: o.valorAdicional.toString(),
+        })),
       };
     });
 
@@ -398,6 +434,7 @@ function toAdminPedido(pedido) {
       precoUnitario: i.precoUnitario.toString(),
       quantidade: i.quantidade.toString(),
       precoTotal: i.precoTotal.toString(),
+      opcionais: i.opcionais ?? [],
     })),
     pagamentos: pedido.pagamentos.map((p) => ({
       formaPagamentoCodigo: p.formaPagamentoCodigo,

@@ -172,12 +172,29 @@ router.get(
       pagina.map((p) => p.codigo),
     );
 
+    // Opcionais só custam a query quando a busca é por uma lista fechada de
+    // códigos (carrinho/favoritos) — a navegação normal (scroll infinito) não
+    // precisa disso e não paga esse custo extra por página.
+    const mapaOpcionais = new Map();
+    if (codigos) {
+      const modosDeServir = await prisma.produtoModoDeServir.findMany({
+        where: { empresaId: empresa.id, produtoCodigo: { in: pagina.map((p) => p.codigo) } },
+        orderBy: { descricao: "asc" },
+      });
+      for (const modo of modosDeServir) {
+        const lista = mapaOpcionais.get(modo.produtoCodigo) ?? [];
+        lista.push({ id: modo.idErp, descricao: modo.descricao, valorAdicional: modo.valorAdicional.toString() });
+        mapaOpcionais.set(modo.produtoCodigo, lista);
+      }
+    }
+
     res.json({
       itens: pagina.map((produto) => {
         const { precoFinal } = resolverPrecoProduto(produto, tabelaAtiva);
         return {
           codigo: produto.codigo,
           descricao: produto.descricao,
+          grupoNome: produto.grupoNome,
           resumo:
             typeof produto.informacoes === "string" && produto.informacoes.trim()
               ? paraTextoPuro(produto.informacoes).slice(0, 140) || null
@@ -192,6 +209,7 @@ router.get(
           // estoque pelo ERP (Empresa.controlaEstoque) — senão saldo
           // zero/negativo não impede a venda.
           esgotado: empresa.controlaEstoque === true && Number(produto.saldo) <= 0,
+          opcionais: mapaOpcionais.get(produto.codigo) ?? [],
         };
       }),
       proximoCursor: temMais ? pagina[pagina.length - 1].codigo : null,
@@ -233,6 +251,11 @@ router.get(
         ? sanitizarHtml(produto.informacoes)
         : null;
 
+    const modosDeServir = await prisma.produtoModoDeServir.findMany({
+      where: { empresaId: empresa.id, produtoCodigo: produto.codigo },
+      orderBy: { descricao: "asc" },
+    });
+
     res.json({
       codigo: produto.codigo,
       descricao: produto.descricao,
@@ -244,6 +267,11 @@ router.get(
       temDesconto: Number(precoFinal) < Number(produto.precoNormal),
       destaque: produto.destaque,
       esgotado: empresa.controlaEstoque === true && Number(produto.saldo) <= 0,
+      opcionais: modosDeServir.map((m) => ({
+        id: m.idErp,
+        descricao: m.descricao,
+        valorAdicional: m.valorAdicional.toString(),
+      })),
     });
   }),
 );
