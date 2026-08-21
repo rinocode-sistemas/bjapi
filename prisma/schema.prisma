@@ -16,9 +16,19 @@ enum Role {
 model Empresa {
   id            String    @id @default(cuid())
   codigoId      String    @unique
+  // Nome "oficial" cadastrado pelo superadmin — não é mais o nome exibido pro
+  // cliente (ver nomeLoja abaixo), mas continua existindo como referência
+  // interna da própria empresa.
   nome          String
   empresaCodigo String
   slug          String    @unique
+  // Nome exibido na loja (vitrine, diretório, painel admin) — por padrão
+  // espelha `nome` (copiado a cada criação/edição no superadmin) até o
+  // lojista customizar pela tela de Configurações; a partir daí,
+  // nomeLojaCustomizado trava esse espelhamento pra sempre (nem superadmin
+  // nem sincronização com o ERP voltam a alterar).
+  nomeLoja            String?
+  nomeLojaCustomizado Boolean @default(false)
   // Obrigatório no cadastro (validado no zod da rota) — coluna tem default
   // vazio só pra não quebrar empresas já cadastradas antes desse campo existir.
   parceiroNegocio String  @default("")

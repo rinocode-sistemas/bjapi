@@ -7,7 +7,7 @@ const { asyncHandler } = require("../lib/asyncHandler");
 const { authenticate, requireRole } = require("../middleware/auth");
 const { SENHA_MSG, isSenhaForte } = require("../lib/passwordRules");
 const { calcularOnboarding } = require("../lib/onboarding");
-const { extrairNomeFantasiaDoErp, extrairEnderecoDoErp } = require("../lib/erpEmpresaDados");
+const { extrairEnderecoDoErp } = require("../lib/erpEmpresaDados");
 
 const router = Router();
 
@@ -22,11 +22,11 @@ router.get(
     });
     if (!empresa) throw new HttpError(404, "Loja não encontrada.");
     if (!empresa.ativo) throw new HttpError(403, "Loja inativa. Entre em contato com o suporte.");
-    const { nomeFantasia, cidade, estado, endereco } = extrairDadosPublicosDoErp(empresa.erpDados);
+    const { cidade, estado, endereco } = extrairDadosPublicosDoErp(empresa.erpDados);
     res.json({
       id: empresa.id,
       slug: empresa.slug,
-      nome: nomeFantasia ?? empresa.nome,
+      nome: empresa.nomeLoja || empresa.nome,
       // Acessar a loja direto pela URL não passa pelo filtro do diretório
       // (/ativas) — sem isso, uma loja que ainda não terminou os 3 passos do
       // onboarding tentaria renderizar a vitrine sem vendedor/bairro/etc.
@@ -69,7 +69,6 @@ function comCacheBuster(url, empresa) {
 // Extrai só os campos seguros do JSON bruto do ERP — nunca repassar erpDados
 // inteiro em rota pública (ele carrega o TokenAcesso do beijaflor).
 function extrairDadosPublicosDoErp(erpDados) {
-  const nomeFantasia = extrairNomeFantasiaDoErp(erpDados);
   const { rua, numero, bairro, cidade, estado } = extrairEnderecoDoErp(erpDados);
   const enderecoPartes = [
     [rua, numero].filter(Boolean).join(", "),
@@ -78,7 +77,7 @@ function extrairDadosPublicosDoErp(erpDados) {
   ].filter(Boolean);
   const endereco = enderecoPartes.length ? enderecoPartes.join(" — ") : null;
 
-  return { nomeFantasia, cidade, estado, endereco };
+  return { cidade, estado, endereco };
 }
 
 // Pública — lojas ativas E com onboarding completo, para o diretório da
@@ -95,6 +94,7 @@ router.get(
       select: {
         slug: true,
         nome: true,
+        nomeLoja: true,
         erpDados: true,
         logoThumbUrl: true,
         updatedAt: true,
@@ -120,10 +120,10 @@ router.get(
 
     res.json(
       prontas.map((empresa) => {
-        const { nomeFantasia, cidade, estado } = extrairDadosPublicosDoErp(empresa.erpDados);
+        const { cidade, estado } = extrairDadosPublicosDoErp(empresa.erpDados);
         return {
           slug: empresa.slug,
-          nome: nomeFantasia ?? empresa.nome,
+          nome: empresa.nomeLoja || empresa.nome,
           logoThumbUrl: comCacheBuster(empresa.logoThumbUrl, empresa),
           cidade,
           estado,
@@ -231,6 +231,9 @@ router.post(
         data: {
           codigoId: data.codigoId,
           nome: data.nome,
+          // Ponto de partida do nome exibido na loja — o lojista pode
+          // customizar depois pela tela de Configurações (ver lojaConfig.routes.js).
+          nomeLoja: data.nome,
           empresaCodigo: data.empresaCodigo,
           slug: data.slug,
           parceiroNegocio: data.parceiroNegocio,
@@ -285,6 +288,10 @@ router.put(
         data: {
           ...(data.codigoId !== undefined && { codigoId: data.codigoId }),
           ...(data.nome !== undefined && { nome: data.nome }),
+          // Continua espelhando o nome exibido na loja só enquanto o
+          // lojista nunca customizou (ver nomeLojaCustomizado) — depois
+          // disso, editar aqui não afeta mais o que os clientes veem.
+          ...(data.nome !== undefined && !atual.nomeLojaCustomizado && { nomeLoja: data.nome }),
           ...(data.empresaCodigo !== undefined && { empresaCodigo: data.empresaCodigo }),
           ...(data.slug !== undefined && { slug: data.slug }),
           ...(data.parceiroNegocio !== undefined && { parceiroNegocio: data.parceiroNegocio }),

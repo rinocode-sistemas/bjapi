@@ -30,6 +30,7 @@ const LOGO_THUMB_DATA_URL_REGEX = /^data:image\/png;base64,([a-zA-Z0-9+/=]+)$/;
 const LOGO_TAMANHO_MAXIMO = 2 * 1024 * 1024;
 
 const lojaConfigSchema = z.object({
+  nomeLoja: z.string().trim().min(1, "Informe o nome da loja.").optional(),
   vendedorPadraoCodigo: z.number().int().nullable().optional(),
   tabelaDePrecoPadraoCodigo: z.number().int().nullable().optional(),
   horarios: horariosSchema,
@@ -69,6 +70,7 @@ function comCacheBuster(url, empresa) {
 
 function toPublicConfig(empresa) {
   return {
+    nomeLoja: empresa.nomeLoja || empresa.nome,
     vendedorPadraoCodigo: empresa.vendedorPadraoCodigo,
     tabelaDePrecoPadraoCodigo: empresa.tabelaDePrecoPadraoCodigo,
     horarios: empresa.horarios,
@@ -106,6 +108,20 @@ router.put(
   asyncHandler(async (req, res) => {
     const { logo, logoThumb, ...data } = lojaConfigSchema.parse(req.body);
     const empresaId = req.auth.empresaId;
+
+    // Só trava (nomeLojaCustomizado) quando o valor realmente muda — salvar
+    // o resto da tela sem mexer no nome não deve tirar do superadmin o
+    // controle de espelhar `nome` aqui (ver empresas.routes.js).
+    if (data.nomeLoja !== undefined) {
+      const empresaAtual = await prisma.empresa.findUnique({
+        where: { id: empresaId },
+        select: { nomeLoja: true, nome: true },
+      });
+      const nomeLojaAtual = empresaAtual?.nomeLoja || empresaAtual?.nome;
+      if (data.nomeLoja !== nomeLojaAtual) {
+        data.nomeLojaCustomizado = true;
+      }
+    }
 
     if (logo === null) {
       data.logoUrl = null;
