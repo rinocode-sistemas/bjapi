@@ -15,6 +15,11 @@ function extrairNomeFantasiaDoErp(erpDados) {
   return null;
 }
 
+function extrairControlaEstoqueDoErp(erpDados) {
+  if (!erpDados || typeof erpDados !== "object") return null;
+  return typeof erpDados.EmpresaControlaEstoque === "boolean" ? erpDados.EmpresaControlaEstoque : null;
+}
+
 function extrairEnderecoDoErp(erpDados) {
   if (!erpDados || typeof erpDados !== "object") {
     return { rua: null, numero: null, bairro: null, cidade: null, estado: null };
@@ -32,4 +37,4 @@ function extrairEnderecoDoErp(erpDados) {
   return { rua, numero, bairro, cidade, estado };
 }
 
-module.exports = { extrairNomeFantasiaDoErp, extrairEnderecoDoErp };
+module.exports = { extrairNomeFantasiaDoErp, extrairEnderecoDoErp, extrairControlaEstoqueDoErp };

@@ -33,6 +33,10 @@ model Empresa {
   erpSenhaCifrada     String?
   erpTokenAcesso      String?
   erpDados            Json?
+  // "EmpresaControlaEstoque" do ERP, extraído de erpDados e salvo à parte a
+  // cada sincronização — define se a loja pode vender produto com saldo
+  // zero/negativo (null enquanto nunca sincronizou).
+  controlaEstoque     Boolean?
   ultimaSincronizacao DateTime?
   vendedores          Vendedor[]
   formasPagamento     FormaPagamento[]

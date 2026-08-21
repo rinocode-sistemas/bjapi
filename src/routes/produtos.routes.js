@@ -188,6 +188,10 @@ router.get(
           precoFinal: precoFinal.toString(),
           temDesconto: Number(precoFinal) < Number(produto.precoNormal),
           rating: notaDoProduto(mapaNotas, produto.codigo),
+          // Só considera esgotado quando a empresa efetivamente controla
+          // estoque pelo ERP (Empresa.controlaEstoque) — senão saldo
+          // zero/negativo não impede a venda.
+          esgotado: empresa.controlaEstoque === true && Number(produto.saldo) <= 0,
         };
       }),
       proximoCursor: temMais ? pagina[pagina.length - 1].codigo : null,
@@ -239,6 +243,7 @@ router.get(
       precoFinal: precoFinal.toString(),
       temDesconto: Number(precoFinal) < Number(produto.precoNormal),
       destaque: produto.destaque,
+      esgotado: empresa.controlaEstoque === true && Number(produto.saldo) <= 0,
     });
   }),
 );

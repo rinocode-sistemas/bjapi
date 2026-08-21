@@ -6,6 +6,7 @@ const { asyncHandler } = require("../lib/asyncHandler");
 const { carregarTabelaAtivaDaEmpresa, resolverPrecoProduto } = require("../lib/precoResolver");
 const { authenticate, requireRole } = require("../middleware/auth");
 const { enviarPedidoParaErp } = require("../lib/enviarPedidoErp");
+const { sincronizarEmpresaEmBackground } = require("../lib/backgroundSync");
 
 const router = Router();
 
@@ -275,6 +276,10 @@ router.post(
     // só fica marcado com erro pro admin ver/reenviar depois.
     if (pedido.status === "ACEITO") {
       await enviarPedidoParaErp(prisma, empresa.id, pedido.id);
+      // Silencioso e sem await de propósito — não pode atrasar a resposta
+      // pro cliente. Puxa produto/estoque atualizado do ERP em background
+      // (ver backgroundSync.js), com debounce próprio por empresa.
+      sincronizarEmpresaEmBackground(empresa.id, "pedido");
     }
 
     res.status(201).json(toPublicPedido(pedido));
@@ -707,6 +712,7 @@ router.patch(
 
     if (status === "ACEITO") {
       await enviarPedidoParaErp(prisma, req.auth.empresaId, pedido.id);
+      sincronizarEmpresaEmBackground(req.auth.empresaId, "pedido");
       atualizado = await prisma.pedido.findUnique({
         where: { id: pedido.id },
         include: { itens: true, pagamentos: true },
