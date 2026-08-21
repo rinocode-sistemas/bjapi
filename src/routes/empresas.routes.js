@@ -95,7 +95,8 @@ router.get(
         slug: true,
         nome: true,
         nomeLoja: true,
-        erpDados: true,
+        cidade: true,
+        estado: true,
         logoThumbUrl: true,
         updatedAt: true,
         lojaFechada: true,
@@ -120,13 +121,12 @@ router.get(
 
     res.json(
       prontas.map((empresa) => {
-        const { cidade, estado } = extrairDadosPublicosDoErp(empresa.erpDados);
         return {
           slug: empresa.slug,
           nome: empresa.nomeLoja || empresa.nome,
           logoThumbUrl: comCacheBuster(empresa.logoThumbUrl, empresa),
-          cidade,
-          estado,
+          cidade: empresa.cidade,
+          estado: empresa.estado,
           lojaFechada: empresa.lojaFechada,
           horarios: empresa.horarios,
         };
