@@ -22,6 +22,52 @@ async function carregarGruposIndisponiveis(empresaId) {
   return grupos.map((g) => g.nome);
 }
 
+// Opcionais por GRUPO (CategoriaOpcionalGrupo/ItemOpcionalGrupo) — sistema
+// novo, cadastrado localmente pelo lojista, independente de
+// ProdutoModoDeServir e nunca tocado pela sincronização com o ERP. Carrega
+// uma vez por grupoNome e reaplica a todos os produtos que compartilham o
+// grupo — é a própria premissa da feature (todo produto do grupo herda as
+// mesmas categorias/itens).
+async function carregarOpcionaisGrupoPorNome(empresaId, gruposNomes) {
+  const mapa = new Map();
+  if (gruposNomes.length === 0) return mapa;
+
+  const grupos = await prisma.grupoProduto.findMany({
+    where: { empresaId, nome: { in: gruposNomes } },
+    select: { id: true, nome: true },
+  });
+  if (grupos.length === 0) return mapa;
+
+  const categorias = await prisma.categoriaOpcionalGrupo.findMany({
+    where: { empresaId, grupoProdutoId: { in: grupos.map((g) => g.id) } },
+    orderBy: [{ ordem: "asc" }, { nome: "asc" }],
+    include: { itens: { where: { ativo: true }, orderBy: [{ ordem: "asc" }, { nome: "asc" }] } },
+  });
+
+  const categoriasPorGrupoId = new Map();
+  for (const categoria of categorias) {
+    if (categoria.itens.length === 0) continue; // categoria sem item ativo não aparece na loja
+    const lista = categoriasPorGrupoId.get(categoria.grupoProdutoId) ?? [];
+    lista.push({
+      id: categoria.id,
+      nome: categoria.nome,
+      minimo: categoria.minimo,
+      maximo: categoria.maximo,
+      itens: categoria.itens.map((item) => ({
+        id: item.id,
+        nome: item.nome,
+        valorAdicional: item.valorAdicional.toString(),
+      })),
+    });
+    categoriasPorGrupoId.set(categoria.grupoProdutoId, lista);
+  }
+
+  for (const grupo of grupos) {
+    mapa.set(grupo.nome, categoriasPorGrupoId.get(grupo.id) ?? []);
+  }
+  return mapa;
+}
+
 // Pública — grupos (categorias) distintos entre os produtos visíveis no site
 // dessa loja. Usado para montar a navegação de categorias do storefront sem
 // precisar listar produtos inteiros no client.
@@ -176,6 +222,7 @@ router.get(
     // códigos (carrinho/favoritos) — a navegação normal (scroll infinito) não
     // precisa disso e não paga esse custo extra por página.
     const mapaOpcionais = new Map();
+    let mapaOpcionaisGrupo = new Map();
     if (codigos) {
       const modosDeServir = await prisma.produtoModoDeServir.findMany({
         where: { empresaId: empresa.id, produtoCodigo: { in: pagina.map((p) => p.codigo) } },
@@ -186,6 +233,9 @@ router.get(
         lista.push({ id: modo.idErp, descricao: modo.descricao, valorAdicional: modo.valorAdicional.toString() });
         mapaOpcionais.set(modo.produtoCodigo, lista);
       }
+
+      const gruposNomes = [...new Set(pagina.map((p) => p.grupoNome).filter(Boolean))];
+      mapaOpcionaisGrupo = await carregarOpcionaisGrupoPorNome(empresa.id, gruposNomes);
     }
 
     res.json({
@@ -210,6 +260,7 @@ router.get(
           // zero/negativo não impede a venda.
           esgotado: empresa.controlaEstoque === true && Number(produto.saldo) <= 0,
           opcionais: mapaOpcionais.get(produto.codigo) ?? [],
+          opcionaisGrupo: produto.grupoNome ? mapaOpcionaisGrupo.get(produto.grupoNome) ?? [] : [],
         };
       }),
       proximoCursor: temMais ? pagina[pagina.length - 1].codigo : null,
@@ -256,6 +307,10 @@ router.get(
       orderBy: { descricao: "asc" },
     });
 
+    const mapaOpcionaisGrupo = produto.grupoNome
+      ? await carregarOpcionaisGrupoPorNome(empresa.id, [produto.grupoNome])
+      : new Map();
+
     res.json({
       codigo: produto.codigo,
       descricao: produto.descricao,
@@ -272,6 +327,7 @@ router.get(
         descricao: m.descricao,
         valorAdicional: m.valorAdicional.toString(),
       })),
+      opcionaisGrupo: produto.grupoNome ? mapaOpcionaisGrupo.get(produto.grupoNome) ?? [] : [],
     });
   }),
 );

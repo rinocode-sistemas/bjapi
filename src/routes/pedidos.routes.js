@@ -67,6 +67,10 @@ const pedidoSchema = z.object({
         // Ids (idErp) dos ProdutoModoDeServir escolhidos — revalidados contra
         // o banco abaixo, nunca confiamos na descrição/valor vindos do client.
         opcionais: z.array(z.number().int()).optional().default([]),
+        // Ids (cuid) dos ItemOpcionalGrupo escolhidos — sistema novo,
+        // independente do ProdutoModoDeServir acima; revalidados contra o
+        // banco abaixo (categoria/descrição/valor nunca vêm do client).
+        opcionaisGrupo: z.array(z.string()).optional().default([]),
       }),
     )
     .min(1, "O carrinho está vazio."),
@@ -145,6 +149,35 @@ router.post(
       opcionaisPorProduto.set(opcional.produtoCodigo, lista);
     }
 
+    // Opcionais por GRUPO (CategoriaOpcionalGrupo/ItemOpcionalGrupo) pedidos
+    // em qualquer item — revalidados de uma vez só contra o banco, nunca
+    // confiamos em categoria/descrição/valor vindos do client. Carrega TODAS
+    // as categorias de cada grupo presente no carrinho (não só as que o
+    // client mandou), pra poder detectar categoria obrigatória omitida.
+    const idsItensGrupoPedidos = [...new Set(data.itens.flatMap((i) => i.opcionaisGrupo))];
+    const gruposNomesDoCarrinho = [...new Set(produtos.map((p) => p.grupoNome).filter(Boolean))];
+    const [itensGrupoValidos, categoriasDoCarrinho] = await Promise.all([
+      idsItensGrupoPedidos.length > 0
+        ? prisma.itemOpcionalGrupo.findMany({
+            where: { empresaId: empresa.id, id: { in: idsItensGrupoPedidos }, ativo: true },
+            include: { categoria: { include: { grupoProduto: true } } },
+          })
+        : [],
+      gruposNomesDoCarrinho.length > 0
+        ? prisma.categoriaOpcionalGrupo.findMany({
+            where: { empresaId: empresa.id, grupoProduto: { nome: { in: gruposNomesDoCarrinho } } },
+            include: { grupoProduto: true },
+          })
+        : [],
+    ]);
+    const itensGrupoPorId = new Map(itensGrupoValidos.map((i) => [i.id, i]));
+    const categoriasPorGrupoNome = new Map();
+    for (const categoria of categoriasDoCarrinho) {
+      const lista = categoriasPorGrupoNome.get(categoria.grupoProduto.nome) ?? [];
+      lista.push(categoria);
+      categoriasPorGrupoNome.set(categoria.grupoProduto.nome, lista);
+    }
+
     const itensResolvidos = data.itens.map((item) => {
       const produto = produtosPorCodigo.get(item.codigo);
       if (!produto) {
@@ -158,7 +191,40 @@ router.post(
         item.opcionais.includes(o.idErp),
       );
       const valorOpcionais = opcionaisDoItem.reduce((soma, o) => soma + Number(o.valorAdicional), 0);
-      const precoUnitario = Number(precoFinal) + valorOpcionais;
+
+      // Opcionais por grupo — descarta seleções de outro grupo (id de
+      // ItemOpcionalGrupo de um grupo diferente do produto sendo comprado) e
+      // valida mínimo/máximo de cada categoria do grupo desse produto.
+      const selecionadosGrupo = item.opcionaisGrupo
+        .map((id) => itensGrupoPorId.get(id))
+        .filter((i) => i && i.categoria.grupoProduto.nome === produto.grupoNome);
+
+      const categoriasDoGrupo = categoriasPorGrupoNome.get(produto.grupoNome) ?? [];
+      const contagemPorCategoria = new Map();
+      for (const selecionado of selecionadosGrupo) {
+        contagemPorCategoria.set(
+          selecionado.categoriaOpcionalGrupoId,
+          (contagemPorCategoria.get(selecionado.categoriaOpcionalGrupoId) ?? 0) + 1,
+        );
+      }
+      for (const categoria of categoriasDoGrupo) {
+        const quantidade = contagemPorCategoria.get(categoria.id) ?? 0;
+        if (categoria.minimo > 0 && quantidade < categoria.minimo) {
+          throw new HttpError(
+            400,
+            `Selecione ao menos ${categoria.minimo} opção(ões) em "${categoria.nome}" (${produto.descricao}).`,
+          );
+        }
+        if (categoria.maximo > 0 && quantidade > categoria.maximo) {
+          throw new HttpError(
+            400,
+            `Você pode escolher no máximo ${categoria.maximo} opção(ões) em "${categoria.nome}" (${produto.descricao}).`,
+          );
+        }
+      }
+      const valorOpcionaisGrupo = selecionadosGrupo.reduce((soma, i) => soma + Number(i.valorAdicional), 0);
+
+      const precoUnitario = Number(precoFinal) + valorOpcionais + valorOpcionaisGrupo;
       const precoTotal = precoUnitario * item.quantidade;
       return {
         produtoCodigo: produto.codigo,
@@ -170,6 +236,11 @@ router.post(
         opcionais: opcionaisDoItem.map((o) => ({
           descricao: o.descricao,
           valorAdicional: o.valorAdicional.toString(),
+        })),
+        opcionaisGrupo: selecionadosGrupo.map((i) => ({
+          categoria: i.categoria.nome,
+          descricao: i.nome,
+          valorAdicional: i.valorAdicional.toString(),
         })),
       };
     });
@@ -435,6 +506,7 @@ function toAdminPedido(pedido) {
       quantidade: i.quantidade.toString(),
       precoTotal: i.precoTotal.toString(),
       opcionais: i.opcionais ?? [],
+      opcionaisGrupo: i.opcionaisGrupo ?? [],
     })),
     pagamentos: pedido.pagamentos.map((p) => ({
       formaPagamentoCodigo: p.formaPagamentoCodigo,

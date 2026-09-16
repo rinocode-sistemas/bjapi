@@ -14,28 +14,28 @@ enum Role {
 }
 
 model Empresa {
-  id            String    @id @default(cuid())
-  codigoId      String    @unique
+  id                  String    @id @default(cuid())
+  codigoId            String    @unique
   // Nome "oficial" cadastrado pelo superadmin — não é mais o nome exibido pro
   // cliente (ver nomeLoja abaixo), mas continua existindo como referência
   // interna da própria empresa.
-  nome          String
-  empresaCodigo String
-  slug          String    @unique
+  nome                String
+  empresaCodigo       String
+  slug                String    @unique
   // Nome exibido na loja (vitrine, diretório, painel admin) — por padrão
   // espelha `nome` (copiado a cada criação/edição no superadmin) até o
   // lojista customizar pela tela de Configurações; a partir daí,
   // nomeLojaCustomizado trava esse espelhamento pra sempre (nem superadmin
   // nem sincronização com o ERP voltam a alterar).
   nomeLoja            String?
-  nomeLojaCustomizado Boolean @default(false)
+  nomeLojaCustomizado Boolean   @default(false)
   // Obrigatório no cadastro (validado no zod da rota) — coluna tem default
   // vazio só pra não quebrar empresas já cadastradas antes desse campo existir.
-  parceiroNegocio String  @default("")
-  ativo         Boolean   @default(true)
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-  usuarios      Usuario[]
+  parceiroNegocio     String    @default("")
+  ativo               Boolean   @default(true)
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  usuarios            Usuario[]
 
   // Integração com o ERP beijaflor
   identificacaoApi    String?          @unique
@@ -102,12 +102,14 @@ model Empresa {
   // Taxa aplicada no checkout quando o bairro devolvido pela busca de CEP/CNPJ
   // não está cadastrado na loja — sem isso, um bairro novo/fora da lista
   // travaria o cliente (o campo bairro é obrigatório pra calcular o frete).
-  valorPadraoFrete Decimal? @db.Decimal(10, 2)
-  bairros          Bairro[]
+  valorPadraoFrete   Decimal? @db.Decimal(10, 2)
+  bairros            Bairro[]
 
-  produtos Produto[]
-  produtoModosDeServir ProdutoModoDeServir[]
-  gruposProdutos GrupoProduto[]
+  produtos                 Produto[]
+  produtoModosDeServir     ProdutoModoDeServir[]
+  gruposProdutos           GrupoProduto[]
+  categoriasOpcionaisGrupo CategoriaOpcionalGrupo[]
+  itensOpcionaisGrupo      ItemOpcionalGrupo[]
 
   tabelasDePrecos TabelaDePrecos[]
 
@@ -117,7 +119,7 @@ model Empresa {
 
   // Numeração sequencial e amigável dos pedidos ("#42"), incrementada
   // atomicamente (update com increment) a cada pedido criado.
-  ultimoPedidoNumero Int       @default(0)
+  ultimoPedidoNumero Int                @default(0)
   pedidos            Pedido[]
   produtoAvaliacoes  ProdutoAvaliacao[]
 
@@ -247,10 +249,66 @@ model GrupoProduto {
 
   disponivel Boolean @default(true)
 
+  categoriasOpcionais CategoriaOpcionalGrupo[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@unique([empresaId, nome])
+}
+
+// Categoria de opcionais configurada localmente pelo lojista para um GRUPO de
+// produtos inteiro (ex.: "PONTO DA CARNE" no grupo LANCHES, min 1 max 1;
+// "EXTRAS", min 0 max 0). Sistema NOVO e independente de ProdutoModoDeServir
+// (que é por produto, vindo do ERP) — nunca tocado pela sincronização com o
+// ERP, 100% administrado no admin local. Todo produto do grupo (vínculo por
+// Produto.grupoNome == GrupoProduto.nome) herda essas categorias na loja.
+model CategoriaOpcionalGrupo {
+  id        String  @id @default(cuid())
+  empresaId String
+  empresa   Empresa @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+
+  grupoProdutoId String
+  grupoProduto   GrupoProduto @relation(fields: [grupoProdutoId], references: [id], onDelete: Cascade)
+
+  nome String
+
+  // minimo=0 maximo=0 -> opcional, múltiplo, sem limite.
+  // minimo=maximo=1   -> obrigatório, escolha única (vira rádio no front).
+  minimo Int @default(0)
+  maximo Int @default(0)
+  ordem  Int @default(0)
+
+  itens ItemOpcionalGrupo[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([grupoProdutoId, nome])
+  @@index([empresaId, grupoProdutoId, ordem])
+}
+
+// Item (opção) dentro de uma CategoriaOpcionalGrupo, com preço adicional
+// próprio (ex.: "BACON — R$ 5,00"). Mesma filosofia de independência do ERP
+// da CategoriaOpcionalGrupo acima.
+model ItemOpcionalGrupo {
+  id        String  @id @default(cuid())
+  empresaId String
+  empresa   Empresa @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+
+  categoriaOpcionalGrupoId String
+  categoria                CategoriaOpcionalGrupo @relation(fields: [categoriaOpcionalGrupoId], references: [id], onDelete: Cascade)
+
+  nome           String
+  valorAdicional Decimal @db.Decimal(12, 4)
+  ativo          Boolean @default(true)
+  ordem          Int     @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([categoriaOpcionalGrupoId, nome])
+  @@index([empresaId, categoriaOpcionalGrupoId, ordem])
 }
 
 model Cliente {
@@ -352,7 +410,7 @@ model Cupom {
 
   // Nulo = sem limite de uso.
   limiteUsos     Int?
-  usosRealizados Int @default(0)
+  usosRealizados Int  @default(0)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -424,7 +482,7 @@ model Pedido {
   cupom       Cupom?  @relation(fields: [cupomId], references: [id], onDelete: SetNull)
   cupomCodigo String?
 
-  subtotal              Decimal @db.Decimal(12, 2)
+  subtotal               Decimal @db.Decimal(12, 2)
   descontoCupomValor     Decimal @default(0) @db.Decimal(12, 2)
   descontoPagamentoValor Decimal @default(0) @db.Decimal(12, 2)
   freteValor             Decimal @default(0) @db.Decimal(12, 2)
@@ -441,11 +499,11 @@ model Pedido {
   nota       Int?
   comentario String? @db.Text
 
-  itens      PedidoItem[]
+  itens             PedidoItem[]
   // Hoje sempre 1 registro (o checkout só permite uma forma de pagamento por
   // pedido) — separado do Pedido já pensando em pagamento dividido no
   // futuro (ex.: parte no cartão, parte no pix), sem precisar migrar de novo.
-  pagamentos PedidoPagamento[]
+  pagamentos        PedidoPagamento[]
   produtoAvaliacoes ProdutoAvaliacao[]
 
   createdAt DateTime @default(now())
@@ -496,6 +554,14 @@ model PedidoItem {
   // vem com a soma desses valores embutida. Só uma lista pequena por item,
   // nunca consultada isolada — Json em vez de tabela própria.
   opcionais Json?
+
+  // Fotografia da seleção do sistema de opcionais por GRUPO de produtos
+  // (CategoriaOpcionalGrupo/ItemOpcionalGrupo) — campo separado de
+  // `opcionais` de propósito: os dois sistemas são independentes e nunca
+  // devem ser confundidos no histórico de um pedido. precoUnitario acima já
+  // vem com a soma desses valores embutida.
+  // [{ categoria: string, descricao: string, valorAdicional: string }]
+  opcionaisGrupo Json?
 
   createdAt DateTime @default(now())
 

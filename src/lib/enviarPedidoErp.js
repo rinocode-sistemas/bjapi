@@ -59,12 +59,18 @@ function montarObservacao(pedido) {
 }
 
 // A API do beijaflor não tem um jeito de mandar os opcionais escolhidos
-// (ProdutoModoDeServir) separados — só um campo de observação livre por
-// item. Junta as descrições com quebra de linha, no formato que o ERP já
-// usa (ex.: "ADICIONAL DE BACON,\nADICIONAL DE OVO,\nSEM CEBOLA").
+// separados — só um campo de observação livre por item. Junta as descrições
+// dos dois sistemas de opcionais (ProdutoModoDeServir, vindo do ERP, e
+// CategoriaOpcionalGrupo/ItemOpcionalGrupo, cadastrado local por grupo) com
+// quebra de linha, no formato que o ERP já usa (ex.: "ADICIONAL DE
+// BACON,\nBEM PASSADO"). Note: este arquivo é o envio de pedido PARA o ERP
+// (não o pipeline de sincronização DO ERP) — os opcionais de grupo nunca são
+// gravados/alterados pela sincronização, só lidos aqui na hora de montar o
+// pedido pra mandar.
 function montarObservacaoDoItem(item) {
   const opcionais = Array.isArray(item.opcionais) ? item.opcionais : [];
-  return opcionais.map((o) => o.descricao).join(",\n");
+  const opcionaisGrupo = Array.isArray(item.opcionaisGrupo) ? item.opcionaisGrupo : [];
+  return [...opcionais, ...opcionaisGrupo].map((o) => o.descricao).join(",\n");
 }
 
 // Endereço só falta quando é retirada + CPF (a única combinação em que o
