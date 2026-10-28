@@ -5,6 +5,10 @@ const BASE_URL = "https://api.beijaflorerp.com.br";
 
 class BeijaflorApiError extends Error {}
 
+// Sem isso, uma chamada pendurada no beijaflor segura a requisição pra
+// sempre (e quem estiver esperando por ela junto).
+const TIMEOUT_MS = 20000;
+
 // Node's fetch recusa corpo em requisições GET ("Request with GET/HEAD method
 // cannot have body"), mas a API do beijaflor exige GET com corpo em
 // RetornaVendedores — por isso usamos o módulo https puro aqui, que não tem
@@ -40,6 +44,9 @@ function requestJson(urlString, { method, headers, body }) {
         });
       },
     );
+    req.setTimeout(TIMEOUT_MS, () => {
+      req.destroy(new BeijaflorApiError("O beijaflor ERP demorou demais para responder."));
+    });
     req.on("error", reject);
     if (payload) req.write(payload);
     req.end();

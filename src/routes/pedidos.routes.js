@@ -377,16 +377,18 @@ router.post(
       return criado;
     });
 
-    // Auto-aceitar já deixou o pedido ACEITO — confirma no ERP agora, antes
-    // de responder ao cliente. Nunca lança (ver enviarPedidoErp.js): se o
-    // beijaflor falhar, o pedido continua aceito do nosso lado mesmo assim,
-    // só fica marcado com erro pro admin ver/reenviar depois.
+    // Auto-aceitar já deixou o pedido ACEITO — confirma no ERP em background,
+    // sem await: o pedido já está gravado, e esperar o beijaflor (login +
+    // envio) aqui fazia a requisição estourar o timeout do lado do cliente
+    // quando o ERP demorava — ele via erro e refazia, duplicando o pedido.
+    // Se o envio falhar, o pedido fica marcado com erro pro admin
+    // ver/reenviar depois (ver enviarPedidoErp.js). Depois do envio, puxa
+    // produto/estoque atualizado do ERP (ver backgroundSync.js), com debounce
+    // próprio por empresa.
     if (pedido.status === "ACEITO") {
-      await enviarPedidoParaErp(prisma, empresa.id, pedido.id);
-      // Silencioso e sem await de propósito — não pode atrasar a resposta
-      // pro cliente. Puxa produto/estoque atualizado do ERP em background
-      // (ver backgroundSync.js), com debounce próprio por empresa.
-      sincronizarEmpresaEmBackground(empresa.id, "pedido");
+      enviarPedidoParaErp(prisma, empresa.id, pedido.id)
+        .catch((err) => console.error("Falha ao enviar pedido ao ERP:", err))
+        .then(() => sincronizarEmpresaEmBackground(empresa.id, "pedido"));
     }
 
     res.status(201).json(toPublicPedido(pedido));
